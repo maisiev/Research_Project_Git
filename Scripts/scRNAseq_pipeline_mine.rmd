@@ -1,0 +1,183 @@
+---
+title: "scRNAseq Data Analysis Pipeline - MV"
+output: html_document
+date: "2026-02-13"
+---
+
+Load Libraries
+
+```{r}
+install.packages("tidyverse")
+library(tidyverse)
+library(Seurat)
+```
+
+Set Input Path
+
+```{r}
+path <- "/Users/maisievarcoe/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/"
+setwd(path)
+```
+
+```{r}
+list.files(path)
+set.seed(42) # For reproducibility 
+```
+
+### Import Data ————————————————————————————
+
+Seurat (Read10X) function reads the folder containing the 'matrix', 'features' and 'barcodes' files and loads them all together to create one object for analysis.
+
+-   Matrix = sparse expression counts (genes x cells)
+
+-   Features = gene info (names, IDs, feature type)
+
+-   Barcodes = cell identifiers (one per column in matrix)
+
+```{r}
+# Read three files from first folder and stores as sparse matrix "a17"
+a17 <- Read10X(
+  "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/DUY679A17") 
+a17
+
+# Removes barcoes and adds sample identifier prefix "a17"
+barcodes <- colnames(a17)
+new_barcodes <- paste0("A17_", barcodes)
+colnames(a17) <- new_barcodes
+
+# Create seurat object using QC filters 
+a17 <- CreateSeuratObject(counts = a17, min.cells = 3, min.features = 200)
+a17
+
+a18 <- Read10X(
+  "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/DUY679A18")
+a18
+barcodes <- colnames(a18)
+new_barcodes <- paste0("A18_", barcodes)
+colnames(a18) <- new_barcodes
+a18 <- CreateSeuratObject(counts = a18, min.cells = 3, min.features = 200)
+a18
+
+
+a21 <- Read10X(
+  "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/DUY679A21")
+a21
+barcodes <- colnames(a21)
+new_barcodes <- paste0("A21_", barcodes)
+colnames(a21) <- new_barcodes
+a21 <- CreateSeuratObject(counts = a21, min.cells = 3, min.features = 200)
+a21
+
+a22 <- Read10X(
+  "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/DUY679A22")
+a22
+barcodes <- colnames(a22)
+new_barcodes <- paste0("A22_", barcodes)
+colnames(a22) <- new_barcodes
+a22 <- CreateSeuratObject(counts = a22, min.cells = 3, min.features = 200)
+a22
+
+a37 <- Read10X(
+  "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/DUY679A37")
+a37
+barcodes <- colnames(a37)
+new_barcodes <- paste0("A37_", barcodes)
+colnames(a37) <- new_barcodes
+a37 <- CreateSeuratObject(counts = a37, min.cells = 3, min.features = 200)
+a37
+
+a38 <- Read10X(
+  "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/outs/DUY679A38")
+a38
+barcodes <- colnames(a38)
+new_barcodes <- paste0("A38_", barcodes)
+colnames(a38) <- new_barcodes
+a38 <- CreateSeuratObject(counts = a38, min.cells = 3, min.features = 200)
+a38
+```
+
+Exploring Objects
+
+```{r}
+slotNames(a17)
+slotNames(a17@meta.data)
+
+# Check if there are any mitochondrial genes 
+mito_genes <- grep("^MT-", rownames(adata), value = TRUE)
+mito_genes
+```
+
+### Quality Control ————————————————————————————-
+
+Remove cells with very low or very high gene/total molecule count because these indicate low quality or empty cells and doublets or multiplets. Also remove cells with high percentage (higher than 5-10%) of mitochondrial genes (these indicate low quality/dying cells).
+
+In the seurat object metadata (after this block runs), we will have nCount_RNA, nFeature_RNA and percent_mt:
+
+-   nCount_RNA = total number of molecules/genes detected in each cell (high number (\>50,000-100,000) of counts could suggest the cell is a doublet or multiplet)
+
+-   nFeature_RNA = total number of unique genes detected in each cell (low number (\<500-100) suggests the cell is dead or empty droplet)
+
+I used threshold of 10% for mitchondrial genes bc skin can have harsh dissociation of cells and this is more relaxed, so not to miss complex details.
+
+A17:
+
+```{r}
+#### Calulate percentage of features with certain condition #####
+
+# In the a17 seurat object, look for % of mitochondrial genes and store this info in the metadata of the a17 object 
+a17[['percent_mt']] <- PercentageFeatureSet(object = a17, pattern = "^MT-")
+a17@meta.data
+
+# Visualise the metadata columns 
+a17_metadata <- VlnPlot(a17, features =c("nCount_RNA", "nFeature_RNA", "percent_mt"), ncol = 3)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a17_metadata.png", plot = a17_metadata, width = 10, height = 6, dpi = 300)
+
+a17_metadata_scatter <- FeatureScatter(a17, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_smooth(method = "lm")
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a17_metadata_scatter.png", plot = a17_metadata_scatter, width = 10, height = 6, dpi = 300)
+
+#Check size of a17 before filtering (19931  5932)
+a17_size_prefilt <- dim(a17)
+
+# Filter out poor quality cells
+# Filtering out cells that have unique feature counts more than 2500 and less than 200
+# And filter out cells with high % of mitochondrial genes 
+a17_filtered <- subset(a17, subset = 
+              nFeature_RNA > 500 &      # Remove very low-quality cells
+              nFeature_RNA < 6000 &     # Remove potential doublets (upper outliers)
+              nCount_RNA > 1000 &       # Remove cells with very few counts
+              nCount_RNA < 50000 &      # Remove extreme count outliers
+              percent_mt < 5)           # Remove high mitochondrial % 
+
+a17_size_postfilt <- dim(a17_filtered)
+a17_size_postfilt #19931  3561
+
+
+```
+
+### Integration ————————————————————————————-
+
+Integration corrects for batch effects and technical differences like sequencing depth or processing day, instead of just merging data. It stops the data clustering by patient, but instead by cell type.
+
+```{r}
+# Create list of objects
+sample_list <- list(a17, a18, a21, a22, a37, a38)
+
+# Normalise each sample seperately 
+# This makes expression values comparable within each sample 
+# and identifies the most variable genes 
+sample_list <- lapply(sample_list, function(x) {
+  x <- NormalizeData(x)
+  x <- FindVariableFeatures(x, selection.method = "vst", nfeatures = 2000)
+  return(x)
+})
+
+# Find anchor cells (pairs of cells that are biologically similar) across samples 
+# Uses CCA (canonical correlation analysis) to find shared variation 
+# Identifies mutual nearest neighbours between datasets and creates a map of which cells correspond across samples 
+features <- SelectIntegrationFeatures(object.list = sample_list)
+anchors <- FindIntegrationAnchors(object.list = sample_list, 
+                                  anchor.features = features)
+
+# Integrate data 
+integrated_samples <- IntegrateData(anchorset = anchors)
+```
