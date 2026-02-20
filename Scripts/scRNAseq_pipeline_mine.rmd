@@ -24,7 +24,7 @@ list.files(path)
 set.seed(42) # For reproducibility 
 ```
 
-### Import Data ————————————————————————————
+# Import Data ————————————————————————————
 
 Seurat (Read10X) function reads the folder containing the 'matrix', 'features' and 'barcodes' files and loads them all together to create one object for analysis.
 
@@ -103,7 +103,9 @@ slotNames(a17)
 slotNames(a17@meta.data)
 ```
 
-### Quality Control ————————————————————————————-
+# Quality Control ————————————————————————————-
+
+## Basic filtering 
 
 Remove cells with very low or very high gene/total molecule count because these indicate low quality or empty cells and doublets or multiplets. Also remove cells with high percentage (higher than 5-10%) of mitochondrial genes (these indicate low quality/dying cells).
 
@@ -338,8 +340,11 @@ ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipe
 
 ```
 
-#### Normalise Data --------------------------------
+## Normalise Data --------------------------------
 Global scaling normalisation method normalises the feature expression measurement for each cell by the total expression (multiples by scale factor 10,000 and log transforms the result)
+
+This log normalisation method divides each cell's gene counts by that cell's total counts, multiplies by 10,000 (to put cells on a common scale), then log transforms. This accounts for differences in sequencing depth between cells while keeping all the data.
+
 
 ```{r}
 a17_norm_filt <- NormalizeData(a17_filtered)
@@ -361,7 +366,7 @@ a38_norm_filt <- NormalizeData(a38_filtered)
 str(a38_norm_filt) 
 ```
 
-#### Identifying Highly Variable Features ----------------------
+## Identifying Highly Variable Features ----------------------
 
 Calculate subset of features (genes) that have high cell-to-cell variation in the dataset (so high expression in some cells and low expression in others) 
 
@@ -377,17 +382,17 @@ a17_norm_filt <- FindVariableFeatures(a17_norm_filt, selection.method = 'vst', n
 a17_top10 <- head(VariableFeatures(a17_norm_filt), 10)
 a17_top10_plot <- LabelPoints(plot = VariableFeaturePlot(a17_norm_filt), points = a17_top10, repel = TRUE) + ggtitle("Top 10 Variable Genes - A17")
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/a17_top10_genes.png", plot = a17_top10_plot, width = 10, height = 6, dpi = 300)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable_Genes/a17_top10_genes.png", plot = a17_top10_plot, width = 10, height = 6, dpi = 300)
 
 #sample a18
 a18_norm_filt <- FindVariableFeatures(a18_norm_filt, selection.method = 'vst', nFeatures = 2000)
 
-# Top 10 highly variable genes
+# Top 10 highly Variable_Genes
 a18_top10 <- head(VariableFeatures(a18_norm_filt), 10)
 a18_top10_plot <- LabelPoints(plot = VariableFeaturePlot(a18_norm_filt), points = a18_top10, repel = TRUE) + ggtitle("Top 10 Variable Genes - A18")
 
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/a18_top10_genes.png", plot = a18_top10_plot, width = 10, height = 6, dpi = 300)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable_Genes/a18_top10_genes.png", plot = a18_top10_plot, width = 10, height = 6, dpi = 300)
 
 #sample a21
 a21_norm_filt <- FindVariableFeatures(a21_norm_filt, selection.method = 'vst', nFeatures = 2000)
@@ -407,7 +412,7 @@ a22_top10 <- head(VariableFeatures(a22_norm_filt), 10)
 a22_top10_plot <- LabelPoints(plot = VariableFeaturePlot(a22_norm_filt), points = a22_top10, repel = TRUE) + ggtitle("Top 10 Variable Genes - A22")
 
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/a22_top10_genes.png", plot = a22_top10_plot, width = 10, height = 6, dpi = 300)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable_Genes/a22_top10_genes.png", plot = a22_top10_plot, width = 10, height = 6, dpi = 300)
 
 #sample a37
 a37_norm_filt <- FindVariableFeatures(a37_norm_filt, selection.method = 'vst', nFeatures = 2000)
@@ -493,12 +498,13 @@ ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipe
 #install.packages("UpSetR")
 library(UpSetR)
 
-upset_data <- as.data.frame(sapply(top10_list, function(x) as.integer(all_genes %in% x)))
+upset_data <- as.data.frame(sapply(hvg_list, function(x) as.integer(all_genes %in% x)))
 rownames(upset_data) <- all_genes
 
+graphics.off()  # close all devices cleanly
 png("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/HVG_upset.png",
     width = 10, height = 6, units = "in", res = 300)
-upset(upset_data, sets = names(top10_list), order.by = "freq", main.bar.color = "steelblue")
+upset(upset_data, sets = names(hvg_list), order.by = "freq", main.bar.color = "steelblue")
 dev.off()
 ```
 
@@ -532,7 +538,7 @@ top10presence_table$N_Samples <- rowSums(top10presence_table[, -1])
 top10presence_table <- top10presence_table[order(-top10presence_table$N_Samples), ]
 
 print(top10presence_table)
-write.csv(top10presence_table, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/Top10HVG_comparison_table.csv", row.names = FALSE)
+write.csv(top10presence_table, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable_Genes/Top10HVG_comparison_table.csv", row.names = FALSE)
 
 #  Heatmap of presence/absence ---
 top10presence_long <- top10presence_table %>%
@@ -548,7 +554,7 @@ top10heatmap_plot <- ggplot(top10presence_long, aes(x = Sample, y = Gene, fill =
   theme_minimal() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/Top10HVG_heatmap.png", 
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable_Genes/Top10HVG_heatmap.png", 
        plot = top10heatmap_plot, width = 8, height = 10, dpi = 300)
 
 # --- 3. UpSet plot (shows combinations of overlap) ---
@@ -557,13 +563,13 @@ library(UpSetR)
 top10upset_data <- as.data.frame(sapply(top10_list, function(x) as.integer(top10all_genes %in% x)))
 rownames(top10upset_data) <- top10all_genes
 
-png("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable Genes/Top10HVG_upset.png",
+png("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Variable_Genes/Top10HVG_upset.png",
     width = 10, height = 6, units = "in", res = 300)
 upset(top10upset_data, sets = names(top10_list), order.by = "freq", main.bar.color = "steelblue")
 dev.off()
 ```
 
-######### Scaling ----------------------------
+# Scaling ----------------------------
 
 Removes unwanted sources of variation like batch effects or biological variation (like cell cycle stage or mitochrondrial contamination. This ensures that the clusters are due to actual differences in gene expression and not other effects. 
 
@@ -571,7 +577,7 @@ For each sample, taking the 2000 HVGs identified earlier and scaling them so eac
 
 ``` {r}
 a17_norm_filt <- ScaleData(a17_norm_filt, features = VariableFeatures(a17_norm_filt))
-View(a17_norm_filt@assays$RNA)
+View(a17_norm_filt@assays$RNA) # in here is counts for all genes and cells (dgCMatrix), the normalised data (dgCMatrix), and scale.data (scaled data for only the 2000 HVGs as dense matrix )
 
 a18_norm_filt <- ScaleData(a18_norm_filt, features = VariableFeatures(a18_norm_filt))
 View(a18_norm_filt@assays$RNA)
@@ -588,3 +594,55 @@ View(a37_norm_filt@assays$RNA)
 a38_norm_filt <- ScaleData(a38_norm_filt, features = VariableFeatures(a38_norm_filt))
 View(a38_norm_filt@assays$RNA)
 ```
+# Merge Samples -------------------
+
+Merging all six samples into one seurat object and reruning normalisation, HVG and scaling steps on merged object
+```{r}
+# Merge all samples into one Seurat object
+merged_seurat <- merge(a17_norm_filt, 
+                       y = list(a18_norm_filt, a21_norm_filt, 
+                                a22_norm_filt, a37_norm_filt, a38_norm_filt),
+                       add.cell.ids = c("A17","A18","A21","A22","A37","A38"))
+
+# Check the merged object
+merged_seurat
+
+# Rerun normalisation, HVG and scaling
+merged_seurat <- NormalizeData(merged_seurat)
+merged_seurat <- FindVariableFeatures(merged_seurat, selection.method = "vst", nfeatures = 2000)
+merged_seurat <- ScaleData(merged_seurat, features = VariableFeatures(merged_seurat))
+```
+
+# Dimensionality Reduction --------------------------
+Visualise the multidimensional dataset
+
+## PCA -----------------
+PCA = summarising all gene expression data across many genes into principal components 
+```{r}
+# Run PCA
+merged_seurat <- RunPCA(merged_seurat, features = VariableFeatures(merged_seurat))
+
+# Visualise PCA - elbow plot helps decide how many PCs to use downstream
+elbow_plot <- ElbowPlot(merged_seurat, ndims = 50) + ggtitle("Level of Variance in Each Principal Component - Merged Samples")
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/elbow_plot.png",
+       plot = elbow_plot, width = 8, height = 6, dpi = 300)
+
+# Visualise which genes drive each PC
+print(merged_seurat[["pca"]], dims = 1:5, nfeatures = 5)
+
+# Extract top genes for each PC and save
+pc_loadings <- as.data.frame(Loadings(merged_seurat, reduction = "pca"))
+pc_top_genes <- apply(pc_loadings, 2, function(x) names(sort(abs(x), decreasing = TRUE)[1:10]))
+write.csv(pc_top_genes, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PC_top_genes.csv")
+
+```
+
+
+
+
+
+
+
+
+
+
