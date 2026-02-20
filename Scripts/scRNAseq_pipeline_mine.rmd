@@ -563,3 +563,28 @@ upset(top10upset_data, sets = names(top10_list), order.by = "freq", main.bar.col
 dev.off()
 ```
 
+######### Scaling ----------------------------
+
+Removes unwanted sources of variation like batch effects or biological variation (like cell cycle stage or mitochrondrial contamination. This ensures that the clusters are due to actual differences in gene expression and not other effects. 
+
+For each sample, taking the 2000 HVGs identified earlier and scaling them so each gene has a mean of 0 and variance of 1 across all cells - puts all genes on same scale so that the highly expressed genes dont dominate downstream steps (e.g.PCA)
+
+``` {r}
+a17_norm_filt <- ScaleData(a17_norm_filt, features = VariableFeatures(a17_norm_filt))
+View(a17_norm_filt@assays$RNA)
+
+a18_norm_filt <- ScaleData(a18_norm_filt, features = VariableFeatures(a18_norm_filt))
+View(a18_norm_filt@assays$RNA)
+
+a21_norm_filt <- ScaleData(a21_norm_filt, features = VariableFeatures(a21_norm_filt))
+View(a21_norm_filt@assays$RNA)
+
+a22_norm_filt <- ScaleData(a22_norm_filt, features = VariableFeatures(a22_norm_filt))
+View(a22_norm_filt@assays$RNA)
+
+a37_norm_filt <- ScaleData(a37_norm_filt, features = VariableFeatures(a37_norm_filt))
+View(a37_norm_filt@assays$RNA)
+
+a38_norm_filt <- ScaleData(a38_norm_filt, features = VariableFeatures(a38_norm_filt))
+View(a38_norm_filt@assays$RNA)
+```
