@@ -101,10 +101,6 @@ Exploring Objects
 ```{r}
 slotNames(a17)
 slotNames(a17@meta.data)
-
-# Check if there are any mitochondrial genes 
-mito_genes <- grep("^MT-", rownames(adata), value = TRUE)
-mito_genes
 ```
 
 ### Quality Control ————————————————————————————-
@@ -139,7 +135,7 @@ ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipe
 a17_size_prefilt <- dim(a17)
 
 # Filter out poor quality cells
-# Filtering out cells that have unique feature counts more than 2500 and less than 200
+# Filtering out cells that have unique feature counts
 # And filter out cells with high % of mitochondrial genes 
 a17_filtered <- subset(a17, subset = 
               nFeature_RNA > 500 &      # Remove very low-quality cells
@@ -150,9 +146,85 @@ a17_filtered <- subset(a17, subset =
 
 a17_size_postfilt <- dim(a17_filtered)
 a17_size_postfilt #19931  3561
+a17_filtered_scatter <- FeatureScatter(a17_filtered, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_smooth(method = "lm")
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a17_filtered_scatter.png", plot = a17_filtered_scatter, width = 10, height = 6, dpi = 300)
+
 
 
 ```
+
+A18:
+
+```{r}
+#### Calulate percentage of features with certain condition #####
+
+# In the a18 seurat object, look for % of mitochondrial genes and store this info in the metadata of the a18 object 
+a18[['percent_mt']] <- PercentageFeatureSet(object = a18, pattern = "^MT-")
+a18@meta.data
+
+# Visualise the metadata columns 
+a18_metadata <- VlnPlot(a18, features =c("nCount_RNA", "nFeature_RNA", "percent_mt"), ncol = 3)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a18_metadata.png", plot = a18_metadata, width = 10, height = 6, dpi = 300)
+
+a18_metadata_scatter <- FeatureScatter(a18, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_smooth(method = "lm")
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a18_metadata_scatter.png", plot = a18_metadata_scatter, width = 10, height = 6, dpi = 300)
+
+#Check size of a18 before filtering 
+a18_size_prefilt <- dim(a18)
+a18_size_prefilt
+
+# Filter out poor quality cells
+# Filtering out cells that have unique feature counts 
+# And filter out cells with high % of mitochondrial genes 
+a18_filtered <- subset(a18, subset = 
+              nFeature_RNA > 500 &      # Remove very low-quality cells
+              nFeature_RNA < 6000 &     # Remove potential doublets (upper outliers)
+              nCount_RNA > 1000 &       # Remove cells with very few counts
+              nCount_RNA < 50000 &      # Remove extreme count outliers
+              percent_mt < 5)           # Remove high mitochondrial % 
+
+a18_size_postfilt <- dim(a18_filtered)
+a18_size_postfilt 
+
+
+```
+
+A21:
+```{r}
+#### Calulate percentage of features with certain condition #####
+
+# In the a21 seurat object, look for % of mitochondrial genes and store this info in the metadata of the a21 object 
+a21[['percent_mt']] <- PercentageFeatureSet(object = a21, pattern = "^MT-")
+a21@meta.data
+
+# Visualise the metadata columns 
+a21_metadata <- VlnPlot(a21, features =c("nCount_RNA", "nFeature_RNA", "percent_mt"), ncol = 3)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a21_metadata.png", plot = a21_metadata, width = 10, height = 6, dpi = 300)
+
+a21_metadata_scatter <- FeatureScatter(a21, feature1 = "nCount_RNA", feature2 = "nFeature_RNA") + geom_smooth(method = "lm")
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/a18_metadata_scatter.png", plot = a21_metadata_scatter, width = 10, height = 6, dpi = 300)
+
+#Check size of a18 before filtering 
+a21_size_prefilt <- dim(a21)
+a21_size_prefilt
+
+# Filter out poor quality cells
+# Filtering out cells that have unique feature counts 
+# And filter out cells with high % of mitochondrial genes 
+a21_filtered <- subset(a21, subset = 
+              nFeature_RNA > 500 &      # Remove very low-quality cells
+              nFeature_RNA < 6000 &     # Remove potential doublets (upper outliers)
+              nCount_RNA > 1000 &       # Remove cells with very few counts
+              nCount_RNA < 50000 &      # Remove extreme count outliers
+              percent_mt < 5)           # Remove high mitochondrial % 
+
+a21_size_postfilt <- dim(a21_filtered)
+a21_size_postfilt 
+
+
+```
+
+
 
 ### Integration ————————————————————————————-
 
