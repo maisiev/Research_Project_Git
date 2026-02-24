@@ -477,8 +477,8 @@ presence_table_filtered <- presence_table[presence_table$N_Samples >= 2, ]
 
 # Converts data from wide format (one column per sample) to long format (one row per gene-sample combination)
 presence_long <- presence_table_filtered %>%
-  select(-N_Samples) %>%
-  pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Present")
+  dplyr::select(-N_Samples) %>%
+  tidyr::pivot_longer(cols = -Gene, names_to = "Sample", values_to = "Present")
 
 heatmap_plot <- ggplot(presence_long, aes(x = Sample, y = Gene, fill = factor(Present))) +
   geom_tile(color = "white") +
@@ -541,8 +541,8 @@ write.csv(top10presence_table, "/Users/maisievarcoe/Desktop/Research Project/Rer
 
 #  Heatmap of presence/absence ---
 top10presence_long <- top10presence_table %>%
-  select(-N_Samples) %>%
-  pivot_longer(-Gene, names_to = "Sample", values_to = "Present")
+  dplyr::select(-N_Samples) %>%
+  tidyr::pivot_longer(-Gene, names_to = "Sample", values_to = "Present")
 
 top10heatmap_plot <- ggplot(top10presence_long, aes(x = Sample, y = Gene, fill = factor(Present))) +
   geom_tile(color = "white") +
@@ -568,7 +568,7 @@ upset(top10upset_data, sets = names(top10_list), order.by = "freq", main.bar.col
 dev.off()
 ```
 
-# Scaling ----------------------------
+# Scaling --------------------------- -
 
 Removes unwanted sources of variation like batch effects or biological variation (like cell cycle stage or mitochrondrial contamination). This ensures that the clusters are due to actual differences in gene expression and not other effects.
 
@@ -594,24 +594,118 @@ a38_norm_filt <- ScaleData(a38_norm_filt, features = VariableFeatures(a38_norm_f
 View(a38_norm_filt@assays$RNA)
 ```
 
-# Merge Samples -------------------
+# Integrating Samples -------------------
 
-Merging all six samples into one seurat object and reruning normalisation, HVG and scaling steps on merged object
+Integrate samples using canonical correlation analysis. This aligns shared biological structure across patients, while reducing batch/patient-driven clustering and preserving cell-type signal.
+
+Creates a batch-corrected expression matrix, that is then re-scaled
 
 ```{r}
-# Merge all samples into one Seurat object
-merged_seurat <- merge(a17_norm_filt, 
-                       y = list(a18_norm_filt, a21_norm_filt, 
-                                a22_norm_filt, a37_norm_filt, a38_norm_filt),
-                       add.cell.ids = c("A17","A18","A21","A22","A37","A38"))
+set.seed(1)
+########### Subsampling
+# need to subsample becuase not enough space otherwise
+subsample_object <- function(obj, n = 5000){
+  n_use <- min(n, ncol(obj))
+  cells <- sample(colnames(obj), n_use)
+  subset(obj, cells = cells)
+}
 
-# Check the merged object
-merged_seurat
+# Take subsample of each sample (3000-5000 cells), bc all cells is too much memory
+a17_sub <- subsample_object(a17_norm_filt, 5000)
+a18_sub <- subsample_object(a18_norm_filt, 5000)
+a21_sub <- subsample_object(a21_norm_filt, 5000)
+a22_sub <- subsample_object(a22_norm_filt, 5000)
+a37_sub <- subsample_object(a37_norm_filt, 5000)
+a38_sub <- subsample_object(a38_norm_filt, 5000)
 
-# Rerun normalisation, HVG and scaling
-merged_seurat <- NormalizeData(merged_seurat)
-merged_seurat <- FindVariableFeatures(merged_seurat, selection.method = "vst", nfeatures = 2000)
-merged_seurat <- ScaleData(merged_seurat, features = VariableFeatures(merged_seurat))
+########### Integration
+# Integrate only the subsample
+object.list <- list(a17_sub, a18_sub, a21_sub,
+                    a22_sub, a37_sub, a38_sub)
+
+# Picks the most variable features across all samples in a batch-aware way
+features <- SelectIntegrationFeatures(object.list, nfeatures = 2000)
+
+anchors <- FindIntegrationAnchors(
+  object.list = object.list,
+  anchor.features = features,
+  dims = 1:15
+)
+
+integrated_ref <- IntegrateData(
+  anchorset = anchors,
+  dims = 1:15
+)
+integrated_ref <- ScaleData(integrated_ref)
+integrated_ref <- RunPCA(integrated_ref, npcs = 30)
+Reductions(integrated_ref)
+
+# !!!!!!!!!!!!!! Free memory
+#rm(anchors, object.list, features)
+gc()
+
+
+############# Project Full Datasets Onto Reference
+# Project each full sample onto the reference PCA space 
+#  Transfers the integrated expression matrix from the reference onto the query cells - essentually imputing batch-corrected values for every cell
+
+project_sample <- function(reference, query){
+  transfer.anchors <- FindTransferAnchors(
+    reference = reference,
+    query = query,
+    dims = 1:15,
+    reference.reduction = "pca"
+  )
+  result <- MapQuery(
+    anchorset = transfer.anchors,
+    reference = reference,
+    query = query,
+    refdata = list(batch_corrected = GetAssayData(reference, assay = "integrated", layer = "data"))
+  )
+  DefaultAssay(result) <- "batch_corrected"
+  result
+}
+
+a17_integrated <- project_sample(integrated_ref, a17_norm_filt)
+a18_integrated <- project_sample(integrated_ref, a18_norm_filt)
+a21_integrated <- project_sample(integrated_ref, a21_norm_filt)
+a22_integrated <- project_sample(integrated_ref, a22_norm_filt)
+a37_integrated <- project_sample(integrated_ref, a37_norm_filt)
+a38_integrated <- project_sample(integrated_ref, a38_norm_filt)
+
+########### Merge and Scale
+# Merge All Projected Objects
+all_integrated <- Reduce(
+  function(x, y) merge(x, y),
+  list(
+    a17_integrated,
+    a18_integrated,
+    a21_integrated,
+    a22_integrated,
+    a37_integrated,
+    a38_integrated
+  )
+)
+
+# The batch-corrected expression matrix 
+DefaultAssay(all_integrated) <- "batch_corrected"
+genes_use <- rownames(all_integrated[["batch_corrected"]])
+
+# Scales the data, mean = 0 (centered), variance = 1 (scaled) 
+# Standardises the expression values across genes
+all_integrated <- ScaleData(all_integrated, features = genes_use)
+
+
+# !!!!!!!!! Free memory
+#rm(a17_integrated, a18_integrated,
+   a21_integrated, a22_integrated,
+   a37_integrated, a38_integrated)
+#rm(integrated_ref)
+
+
+gc()
+
+
 ```
 
 # Dimensionality Reduction --------------------------
@@ -631,34 +725,57 @@ Genes with large loadings for the first PCS explain most of the variability in t
 Cells are clustered based on their gene expression profile (the basis of differentiation), so different clusters usually represent different cell types.
 
 ```{r}
-# Run PCA #########
-merged_seurat <- RunPCA(merged_seurat, features = VariableFeatures(merged_seurat))
+# Run PCA ###############
+all_integrated <- RunPCA(all_integrated, npcs = 30, features = genes_use)
+
+# Check it worked
+Reductions(all_integrated)
 
 # Visualise PCA - elbow plot helps decide how many PCs to use downstream
-elbow_plot <- ElbowPlot(merged_seurat, ndims = 50) + ggtitle("Level of Variance in Each Principal Component - Merged Samples")
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/elbow_plot.png",
+ElbowPlot(all_integrated, ndims = 30)
+elbow_plot <- ElbowPlot(all_integrated, ndims = 30) + ggtitle("Level of Variance in Each Principal Component - Integrated Samples")
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/elbow_plot.png",
        plot = elbow_plot, width = 8, height = 6, dpi = 300)
 elbow_plot
 
 # Visualise which genes drive each PC
-print(merged_seurat[["pca"]], dims = 1:5, nfeatures = 5)
-PC1_Heatmap <- DimHeatmap(merged_seurat, dims = 1, cells = 500, balanced = TRUE)
-PCA_DimPlot <- DimPlot(merged_seurat, reduction = "pca") + NoLegend()
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PC1_Heatmap.png",
+print(all_integrated[["pca"]], dims = 1:5, nfeatures = 5)
+PC1_Heatmap <- DimHeatmap(all_integrated, dims = 1, cells = 500, balanced = TRUE)
+PCA_DimPlot <- DimPlot(all_integrated, reduction = "pca") + NoLegend()
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/PC1_Heatmap.png",
        plot = PC1_Heatmap, width = 8, height = 6, dpi = 300)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_DimPlot.png",
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/PCA_DimPlot.png",
        plot = PCA_DimPlot, width = 8, height = 6, dpi = 300)
 
 # Extract top genes for each PC and save
-pc_loadings <- as.data.frame(Loadings(merged_seurat, reduction = "pca"))
+pc_loadings <- as.data.frame(Loadings(all_integrated, reduction = "pca"))
 pc_top_genes <- apply(pc_loadings, 2, function(x) names(sort(abs(x), decreasing = TRUE)[1:10]))
 write.csv(pc_top_genes, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PC_top_genes.csv")
 
 # Clustering #######
-merged_seurat <- FindNeighbors(merged_seurat, dims = 1:15) # Used top 20 PCs, based on where elbow plot plataeus 
-merged_seurat <- FindClusters(merged_seurat, resolution = c(0.1, 0.3, 0.5, 0.7, 1)) # Trying different resolution parameters
-View(merged_seurat@meta.data)
+all_integrated <- FindNeighbors(all_integrated, dims = 1:15) # Used top 15 PCs, based on where elbow plot plataeus 
+all_integrated <- FindClusters(all_integrated, resolution = c(0.1, 0.3, 0.5, 0.7, 1)) # Trying different resolution parameters
+View(all_integrated@meta.data)
 
+# View clusters
+# First, plotting the 0.1 resolution (find name in metadata)
+# Decide which resolution parameter makes the most sense
+DimPlot(all_integrated, group.by = 'batch_corrected_snn_res.0.1', label = TRUE)
+
+# Decided on 0.1
+# Set identity of clusters
+Idents(all_integrated) <- 'batch_corrected_snn_res.0.1'
+PCA_clusters <- DimPlot(all_integrated, reduction = "pca", label = TRUE)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_res.0.1.png",
+       plot = PCA_clusters, width = 8, height = 6, dpi = 300)
+
+all_integrated <- FindClusters(all_integrated, resolution = 0.2)
+PCA_0.2 <- DimPlot(all_integrated, group.by = "batch_corrected_snn_res.0.2", label = TRUE)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_res.0.2.png",
+       plot = PCA_0.2, width = 8, height = 6, dpi = 300)
+```
+
+```{r}
 # View clusters
 # First, plotting the 0.1 resolution (find name in metadata)
 # Decide which resolution parameter makes the most sense
