@@ -766,31 +766,12 @@ DimPlot(all_integrated, group.by = 'batch_corrected_snn_res.0.1', label = TRUE)
 # Set identity of clusters
 Idents(all_integrated) <- 'batch_corrected_snn_res.0.1'
 PCA_clusters <- DimPlot(all_integrated, reduction = "pca", label = TRUE)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_res.0.1.png",
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/PCA_res.0.1.png",
        plot = PCA_clusters, width = 8, height = 6, dpi = 300)
 
 all_integrated <- FindClusters(all_integrated, resolution = 0.2)
 PCA_0.2 <- DimPlot(all_integrated, group.by = "batch_corrected_snn_res.0.2", label = TRUE)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_res.0.2.png",
-       plot = PCA_0.2, width = 8, height = 6, dpi = 300)
-```
-
-```{r}
-# View clusters
-# First, plotting the 0.1 resolution (find name in metadata)
-# Decide which resolution parameter makes the most sense
-DimPlot(merged_seurat, group.by = 'RNA_snn_res.0.1', label = TRUE)
-# Decided on 0.1
-#Set identity of clusters
-Idents(merged_seurat) <- 'RNA_snn_res.0.1'
-PCA_clusters <- DimPlot(merged_seurat, reduction = "pca", label = TRUE)
-
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_res.0.1.png",
-       plot = PCA_clusters, width = 8, height = 6, dpi = 300)
-
-merged_seurat <- FindClusters(merged_seurat, resolution = 0.2)
-DimPlot(merged_seurat, group.by = "RNA_snn_res.0.3", label = TRUE)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/PCA_res.0.2.png",
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/PCA_res.0.2.png",
        plot = PCA_0.2, width = 8, height = 6, dpi = 300)
 ```
 
@@ -801,9 +782,9 @@ Another dimensionality reduction method
 Non-linear
 
 ```{r}
-merged_seurat <- RunUMAP(merged_seurat, dims = 1:15) # First 20 PCs
-UMAP <- DimPlot(merged_seurat, label = TRUE, reduction = 'umap')
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/UMAP_res.0.1.png",
+all_integrated <- RunUMAP(all_integrated, dims = 1:15)
+UMAP <- DimPlot(all_integrated, label = TRUE, reduction = 'umap')
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/UMAP_res.0.1.png",
        plot = UMAP, width = 8, height = 6, dpi = 300)
 ```
 
@@ -818,42 +799,63 @@ Marker genes are highly and specifically expression in one cluster compared to o
 **p_val_adj** - adjusted p-value (want this \< 0.05)
 
 ```{r}
-Idents(merged_seurat) <- "RNA_snn_res.0.1"
-merged_seurat <- JoinLayers(merged_seurat) # Join layers in object, needed for Seurat V5
+Idents(all_integrated) <- "batch_corrected_snn_res.0.1"
+DefaultAssay(all_integrated) <- "RNA"
+all_integrated[["RNA"]] <- JoinLayers(all_integrated[["RNA"]])
 
-#Find marker genes
-markers <- FindAllMarkers(merged_seurat, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25)
+# Find marker genes
+markers <- FindAllMarkers(all_integrated, 
+                          only.pos = TRUE, # returns genes that are upregulated
+                          min.pct = 0.25, # gene must be detected in at least 25% of cells in either the cluster being tested or the rest of the cells 
+                          logfc.threshold = 0.25) # gene must have at least 0.25 log2 fold change difference between the cluster and all other cells
+
+# Pulling out the top 5 marker genes for each cluster, ranked by fold change
 markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
 
-#Top 5 markers
+# Saving top 5 markers
 top5_markers <- markers %>% group_by(cluster) %>% top_n(n = 5, wt = avg_log2FC)
 
-# Save 
-write.csv(top5_markers, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/markers_top5.csv", row.names = FALSE)
-
-write.csv(markers, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/markers_all.csv", row.names = FALSE)
+# Save
+dir.create("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated",
+           recursive = TRUE, showWarnings = FALSE)
+write.csv(top5_markers, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/markers_top5.csv", row.names = FALSE)
+write.csv(markers, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/markers_all.csv", row.names = FALSE)
 
 # Identify top genes
 top5 <- markers %>% 
   group_by(cluster) %>% 
   top_n(n = 5, wt = avg_log2FC) %>%
   arrange(cluster)
-
 print(top5[, c("cluster", "gene", "avg_log2FC")], n = 55)
-FeaturePlot(merged_seurat, features = c("MKI67", "PTPRC", "EPCAM", "COL1A1", "PECAM1", "KRT19"))
+
+
+#Plot these canonical cell type marker genes to help identify which clusters light up on my umap
+DefaultAssay(all_integrated) <- "RNA"
+FeaturePlot(all_integrated, features = c("MKI67", "PTPRC", "EPCAM", "COL1A1", "PECAM1", "KRT19"))
+
+# Plot top markers from my own data
+FeaturePlot(all_integrated, features = c("KRT6A", "GZMA", "TYR", "C1QA", "PLK1", "MGP"))
+
+cluster_vln <- VlnPlot(all_integrated, 
+        features = c("KRT6A", "GZMA", "TYR", "C1QA", "PLK1", "MGP"),
+        pt.size = 0)
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/cluster_vln.png",
+       plot = cluster_vln, width = 8, height = 6, dpi = 300)
 
 # Annotate the clusters with the cell types
-new.cluster.ids <- c("Proliferating", "Keratinocytes", "Squamous Epithelial", 
-                     "Fibroblasts", "Epithelial", "T cells", 
-                     "Epithelial", "Basal Epithelial", "Macrophages", "Melanocytes")
-names(new.cluster.ids) <- levels(merged_seurat)
-merged_seurat <- RenameIdents(merged_seurat, new.cluster.ids)
-Annotated_Clusters <- DimPlot(merged_seurat, label = TRUE, repel = TRUE)
+new.cluster.ids <- c("Fibroblasts", "Keratinocytes", "Keratinocytes",
+                     "Proliferating", "T cells", "Basal Epithelial",
+                     "Squamous Epithelial", "Macrophages", "Melanocytes",
+                     "Fibroblasts", "Lymphocytes")
+names(new.cluster.ids) <- levels(all_integrated)
+all_integrated <- RenameIdents(all_integrated, new.cluster.ids)
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Annotated_Clusters.png",
+Annotated_Clusters <- DimPlot(all_integrated, label = TRUE, repel = TRUE)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Integrated/Annotated_Clusters.png",
        plot = Annotated_Clusters, width = 8, height = 6, dpi = 300)
 
-table(merged_seurat@meta.data$orig.ident)
+table(all_integrated@meta.data$orig.ident)
 ```
 
 ## Finding the Most Highly Expressed Genes per Cluster —-
@@ -863,23 +865,25 @@ The **log2FC** from the markers file is effect size measurement
 Plotting the effects size of the top genes in each cluster, taking into account the pct.1 (% of cells in that cluster expressing that gene)
 
 ```{r}
-#arrange by cluster
+# arrange by cluster
 top5 <- top5 %>% arrange(cluster, desc(avg_log2FC))
 top5$gene <- factor(top5$gene, levels = unique(top5$gene))
 
-#plot with cell type names
+# plot with cell type names matching your annotations
 top5$cluster <- recode(top5$cluster,
-  "0" = "Proliferating",
+  "0" = "Fibroblasts",
   "1" = "Keratinocytes",
-  "2" = "Squamous Epithelial",
-  "3" = "Fibroblasts",
-  "4" = "Epithelial",
-  "5" = "T cells",
-  "6" = "Epithelial",
-  "7" = "Basal Epithelial",
-  "8" = "Macrophages",
-  "9" = "Melanocytes"
+  "2" = "Keratinocytes",
+  "3" = "Proliferating",
+  "4" = "T cells",
+  "5" = "Basal Epithelial",
+  "6" = "Squamous Epithelial",
+  "7" = "Macrophages",
+  "8" = "Melanocytes",
+  "9" = "Fibroblasts",
+  "10" = "Lymphocytes"
 )
+
 # Bubble plot
 Effect_per_Cluster <- ggplot(top5, aes(x = cluster, y = gene, 
                   size = pct.1, 
@@ -892,21 +896,69 @@ Effect_per_Cluster <- ggplot(top5, aes(x = cluster, y = gene,
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1))
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes//Effect_per_cell_type.png",
-       plot = Effect_per_Cluster, width = 8, height = 6, dpi = 300)
+Effect_per_Cluster
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/Effect_per_cell_type.png",
+       plot = Effect_per_Cluster, width = 8, height = 8, dpi = 300)
 
+# Heatmap
 library(pheatmap)
-
-avg_expr <- AverageExpression(merged_seurat, 
+top5_genes <- unique(top5$gene)
+avg_expr <- AverageExpression(all_integrated, 
                                features = top5_genes,
                                return.seurat = FALSE)$RNA
-heatmap <- pheatmap(avg_expr, 
+# Convert sparse matrix to dense
+avg_expr_dense <- as.matrix(avg_expr)
+
+library(ggplotify)
+
+p <- as.ggplot(pheatmap(avg_expr_dense, 
          scale = "row",
          color = colorRampPalette(c("#1E88E5", "white", "#D81B60"))(100),
          angle_col = 45,
-         fontsize_row = 7)
+         fontsize_row = 10,
+         fontsize_col = 10,
+         show_rownames = TRUE,
+         show_colnames = TRUE))
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/cells_expression.png",
-       plot = heatmap, width = 8, height = 6, dpi = 300)
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/cells_expression.png", plot = p, width = 10, height = 9, dpi = 300)
+
+
+colnames(markers)
+# Create significance matrix for top5 genes
+sig_matrix <- matrix("", nrow = nrow(avg_expr_dense), ncol = ncol(avg_expr_dense))
+rownames(sig_matrix) <- rownames(avg_expr_dense)
+colnames(sig_matrix) <- colnames(avg_expr_dense)
+
+# Fill in significance stars
+for (gene in rownames(sig_matrix)) {
+  for (cluster in colnames(sig_matrix)) {
+    p <- markers %>% 
+      filter(gene == !!gene, cluster == !!cluster) %>% 
+      pull(p_val_adj)
+    if (length(p) > 0) {
+      sig_matrix[gene, cluster] <- case_when(
+        p < 0.001 ~ "***",
+        p < 0.01  ~ "**",
+        p < 0.05  ~ "*",
+        TRUE      ~ ""
+      )
+    }
+  }
+}
+
+# Add to heatmap
+p <- as.ggplot(pheatmap(avg_expr_dense,
+         scale = "row",
+         color = colorRampPalette(c("#1E88E5", "white", "#D81B60"))(100),
+         angle_col = 45,
+         fontsize_row = 10,
+         fontsize_col = 10,
+         show_rownames = TRUE,
+         show_colnames = TRUE,
+         display_numbers = sig_matrix,
+         fontsize_number = 8))
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/cells_expression.png",
+       plot = p, width = 10, height = 9, dpi = 300)
 
 ```
