@@ -1297,11 +1297,11 @@ heatmap_count <- as.ggplot(function()
 heatmap_weight <- as.ggplot(function() 
   ComplexHeatmap::draw(netVisual_heatmap(cellchat, measure = "weight")))
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Heatmap_Count.png",
+ggsave(filename="/Users/maisievarcoe/Desktop/Research_Project/RerunningPipelines/My_Pipeline/SingleR_Annotations/Heatmap_Count.png",
        plot = heatmap_count,
        width = 8, height = 8, dpi = 300)
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Heatmap_Weight.png",
+ggsave(filename="/Users/maisievarcoe/Desktop/Research_Project/RerunningPipelines/My_Pipeline/SingleR_Annotations/Heatmap_Weight.png",
        plot = heatmap_weight,
        width = 8, height = 8, dpi = 300)
 
@@ -1313,7 +1313,7 @@ cellchat <- netAnalysis_computeCentrality(cellchat)
 gg <- rankNet(cellchat, mode = "single")
 gg
 
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Ranked_Signalling.png",
+ggsave(filename="/Users/maisievarcoe/Desktop/Research_Project/RerunningPipelines/My_Pipeline/SingleR_Annotations/Ranked_Signalling.png",
        plot = gg,
        width = 8,
        height = 10,
@@ -1322,4 +1322,32 @@ ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipe
 
 ```{r}
 ncol(all_merged)
+```
+
+## CellChat *S. Aureus* High and Low
+
+Adding metadata to my single cell object with information of which samples have SA high \>35 or SA low \<10.
+
+```{r}
+SA35 <- readRDS("~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/cellchat/SAureus_35/cellchat_SAureus_35.rds")
+View(SA35@meta)
+SA10 <- readRDS("~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/cellchat/SAureus_10/cellchat_SAureus_10.rds")
+
+# Extract barcodes from SA high and low
+Barcodes_35 <- colnames(SA35)
+Barcodes_10 <- colnames(SA10)
+
+# Create new column relating to S aureus levels
+all_merged$S.aureus <- "Other"
+
+# Assign high or low based on the barcodes
+all_merged@meta.data[Barcodes_35, "S.aureus"] <- ">35"
+all_merged@meta.data[Barcodes_10, "S.aureus"] <- "<10"
+
+# Add this to cellChat object too
+cellchat@meta$S.aureus <- all_merged@meta.data$S.aureus
+head(colnames(all_merged))
+head(Barcodes_35)
+
+# 
 ```
