@@ -8,8 +8,14 @@ Load Libraries
 
 ```{r}
 install.packages("tidyverse")
+install.packages("viridis")
+library(viridis)
+library(CellChat)
 library(tidyverse)
 library(Seurat)
+library(ComplexHeatmap)
+library(patchwork)
+library(SingleR)
 ```
 
 Set Input Path
@@ -601,7 +607,7 @@ Integrate samples using canonical correlation analysis. This aligns shared biolo
 **Harmony** - Takes the PCA embedding and iteratively adjusts it to remove batch effects while preserving biological variation. It's generally faster and more memory efficient than CCA.
 
 ```{r}
-install.packages("harmony")
+#install.packages("harmony")
 library(harmony)
 ```
 
@@ -621,6 +627,8 @@ all_merged <- FindVariableFeatures(all_merged, nfeatures = 2000)
 # Explicitly pass variable features to ScaleData
 var_features <- VariableFeatures(all_merged)
 all_merged <- ScaleData(all_merged, features = var_features)
+
+saveRDS(all_merged, "all_merged_integrated.rds")
 
 ```
 
@@ -666,31 +674,6 @@ all_merged <- RunHarmony(all_merged, group.by.vars = "orig.ident")
 all_merged <- FindNeighbors(all_merged, reduction = "harmony", dims = 1:15) # Used top 15 PCs, based on where elbow plot plataeus 
 all_merged <- FindClusters(all_merged, resolution = c(0.1, 0.2, 0.3, 0.5, 0.7, 1)) # Trying different resolution parameters
 
-
-# Uncorrected PCA loadings and dimplot
-PC1_Heatmap <- DimHeatmap(all_merged, dims = 1, cells = 500, balanced = TRUE)
-PCA_DimPlot <- DimPlot(all_merged, reduction = "pca") + NoLegend()
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/PC1_Heatmap.png",
-       plot = PC1_Heatmap, width = 8, height = 6, dpi = 300)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/PCA_DimPlot.png",
-       plot = PCA_DimPlot, width = 8, height = 6, dpi = 300)
-
-# Harmony corrected embeddings
-Harmony_DimPlot <- DimPlot(all_merged, reduction = "harmony") + NoLegend()
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/Harmony_DimPlot.png",
-       plot = Harmony_DimPlot, width = 8, height = 6, dpi = 300)
-
-
-# View metadata
-View(all_merged@meta.data)
-
-# Check batch mixing to ensure clusters arent separated by batches
-Batch_mixing <- DimPlot(all_merged, reduction = "umap", group.by = "orig.ident")
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/Batch_Mixing.png",
-       plot = Batch_mixing, width = 8, height = 6, dpi = 300)
-
-
-
 ```
 
 ## UMAP ——————————-
@@ -700,21 +683,51 @@ Another dimensionality reduction method
 Non-linear
 
 ```{r}
+
+# --- 1. Setup Environment ---
+# Define output directory to avoid repeating long strings
+out_dir <- "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/"
+
+# --- 2. Pre-Correction Diagnostics (PCA) ---
+# These show the data before batch correction
+PC1_Heatmap <- DimHeatmap(all_merged, dims = 1, cells = 500, balanced = TRUE)
+PCA_DimPlot <- DimPlot(all_merged, reduction = "pca") + NoLegend() + ggtitle("Standard PCA")
+PCA_DimPlot
+ggsave(paste0(out_dir, "PC1_Heatmap.png"), plot = PC1_Heatmap, width = 8, height = 6)
+ggsave(paste0(out_dir, "PCA_DimPlot.png"), plot = PCA_DimPlot, width = 8, height = 6)
+
+# --- 3. Run Harmony & UMAP ---
+# run UMAP using the batch-corrected Harmony embeddings
 all_merged <- RunUMAP(all_merged, reduction = "harmony", dims = 1:15)
 
-# Plot resolutions to decide which to use
-UMAP_0.1 <- DimPlot(all_merged, group.by = 'RNA_snn_res.0.1', label = TRUE, reduction = "umap")
-UMAP_0.2 <- DimPlot(all_merged, group.by = 'RNA_snn_res.0.2', label = TRUE, reduction = "umap")
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/UMAP_res.0.1.png",
-       plot = UMAP_0.1, width = 8, height = 6, dpi = 300)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/UMAP_res.0.2.png",
-       plot = UMAP_0.2, width = 8, height = 6, dpi = 300)
+# Diagnostic: View Harmony embeddings (Check for batch overlap)
+Harmony_DimPlot <- DimPlot(all_merged, reduction = "harmony") + NoLegend() + ggtitle("Harmony Embeddings")
+Harmony_DimPlot
+ggsave(paste0(out_dir, "Harmony_DimPlot.png"), plot = Harmony_DimPlot, width = 8, height = 6)
 
-# Set identity and plot on harmony embedding
-Idents(all_merged) <- 'RNA_snn_res.0.1'
-Harmony_clusters <- DimPlot(all_merged, reduction = "harmony", label = TRUE)
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/PCA/Harmony/Harmony_res.0.1.png",
-       plot = Harmony_clusters, width = 8, height = 6, dpi = 300)
+# Diagnostic: Check batch mixing on UMAP
+Batch_mixing <- DimPlot(all_merged, reduction = "umap", group.by = "orig.ident") + ggtitle("Batch Mixing (UMAP)")
+Batch_mixing
+ggsave(paste0(out_dir, "Batch_Mixing.png"), plot = Batch_mixing, width = 8, height = 6)
+
+# --- 4. Final Clustering (Resolution 0.2) ---
+# Set the active identity to preferred resolution
+Idents(all_merged) <- 'RNA_snn_res.0.2'
+
+# Plot 0.2 Clusters on UMAP (Final figure style)
+UMAP_0.2 <- DimPlot(all_merged, reduction = "umap", label = TRUE) + 
+  ggtitle("UMAP Clusters: Res 0.2")
+UMAP_0.2
+
+# Plot 0.2 Clusters on Harmony
+Harmony_res_0.2 <- DimPlot(all_merged, reduction = "harmony", label = TRUE) + 
+  ggtitle("Harmony Clusters: Res 0.2")
+Harmony_res_0.2
+
+# Save final cluster plots
+ggsave(paste0(out_dir, "UMAP_res.0.2.png"), plot = UMAP_0.2, width = 8, height = 6)
+ggsave(paste0(out_dir, "Harmony_res.0.2.png"), plot = Harmony_res_0.2, width = 8, height = 6)
+
 
 ```
 
@@ -729,79 +742,54 @@ Marker genes are highly and specifically expression in one cluster compared to o
 **p_val_adj** - adjusted p-value (want this \< 0.05)
 
 ```{r}
+# --- 1. Ensure Resolution is 0.2 ---
+Idents(all_merged) <- 'RNA_snn_res.0.2'
+DefaultAssay(all_merged) <- "RNA" # Markers should always be found on the RNA counts
+
+saveRDS(all_merged, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/all_merged.rds")
+# --- 2. Run Marker Discovery ---
 markers <- FindAllMarkers(
   all_merged,
-  only.pos = TRUE,        # gives only positive markers (genes that are upregulated)
-  min.pct = 0.25,         # gene must be detected in at least 25% of cells in either the cluster being tested or the rest of the cells 
-  logfc.threshold = 0.25  # gene must have a minimum 0.25 log2 fold change difference between the cluster and all other cells
+  only.pos = TRUE, # gives only positive markers (genes that are upregulated)
+  min.pct = 0.25,  # gene must be detected in at least 25% of cells in either the cluster being tested or the rest of the cells 
+  logfc.threshold = 0.25 # gene must have a minimum 0.25 log2 fold change difference between the cluster and all other cells
 )
 
-head(markers)
-
-# Filter by statistically significant genes (p_adj<0.05), (pct.1>0.25 = keeps genes expressed in at least 25% of cells in that cluster)
+# Filter for significance and high expression
 markers_filtered <- markers %>%
   filter(p_val_adj < 0.05, pct.1 > 0.25)
 
-# Top 10 genes with highest fold change per cluster 
-top_markers <- markers_filtered %>%
+# Get the top 10 gene NAMES (as a vector) for plotting
+top_10_names <- markers_filtered %>%
   group_by(cluster) %>%
-  slice_max(avg_log2FC, n = 10)
+  slice_max(avg_log2FC, n = 10) %>%
+  pull(gene) %>%             # Extract just the gene column
+  unique()                   # Remove duplicates if a gene marks multiple clusters
 
-# Save
-dir.create("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Harmony",
-           recursive = TRUE, showWarnings = FALSE)
-write.csv(top_markers, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Integrated/markers_top10.csv", row.names = FALSE)
+# --- 3. Save the Data ---
+out_dir <- "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Harmony/"
+dir.create(out_dir, recursive = TRUE, showWarnings = FALSE)
 
+write.csv(markers_filtered, paste0(out_dir, "markers_res0.2_all.csv"), row.names = FALSE)
 
+# --- 4. Plotting ---
 
-#Plot these canonical cell type marker genes to help identify which clusters light up on my umap
-# set assay
-DefaultAssay(all_merged) <- "RNA"
+# A. Canonical Markers 
+canonical_markers <- c("MKI67", "PTPRC", "EPCAM", "COL1A1", "PECAM1", "KRT19")
+canonical_plot <- FeaturePlot(all_merged, features = canonical_markers, ncol = 3)
+canonical_plot
 
-
-# Canonical marker genes (reference biology)
-canonical_markers <- c("MKI67", "PTPRC", "EPCAM",
-                       "COL1A1", "PECAM1", "KRT19")
-
-FeaturePlot(all_merged,
-            features = canonical_markers)
-
-# Save canonical marker plot
-canonical_plot <- FeaturePlot(all_merged,
-                              features = canonical_markers)
-
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Harmony/canonical_markers.png",
-       plot = canonical_plot,
-       width = 8,
-       height = 6,
-       dpi = 300)
-
-FeaturePlot(all_merged, features = c("MKI67", "PTPRC", "EPCAM", "COL1A1", "PECAM1", "KRT19"))
-
-# Top markers from your dataset
-# -----------------------------------------
-top_marker_genes <- c("KRT6A", "GZMA", "TYR",
-                 "C1QA", "PLK1", "MGP")
-
-dataset_markers <- FeaturePlot(all_merged,
-            features = top_markers)
-
-cluster_vln <- VlnPlot(all_merged,
-                      features = top_markers,
-                      pt.size = 0)
-
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Harmony/dataset_markers.png",
-       plot = dataset_markers,
-       width = 8,
-       height = 6,
-       dpi = 300)
-
-ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/Marker_Genes/Harmony/cluster_vln.png",
-       plot = cluster_vln,
-       width = 8,
-       height = 6,
-       dpi = 300)
-
+# B. Top Markers from Data 
+# Using a subset of top_10_names so the plot isn't too crowded
+dataset_markers_plot <- FeaturePlot(all_merged, features = head(top_10_names, 9), ncol = 3)
+dataset_markers_plot
+# C. Violin Plot for Clusters
+cluster_vln <- VlnPlot(all_merged, features = head(top_10_names, 6), pt.size = 0)
+cluster_vln
+# Save Plots
+ggsave(paste0(out_dir, "canonical_markers.png"), plot = canonical_plot, width = 12, height = 8)
+ggsave(paste0(out_dir, "top_dataset_markers.png"), plot = dataset_markers_plot, width = 12, height = 8)
+ggsave(paste0(out_dir, "cluster_vln.png"), plot = cluster_vln, width = 12, height = 8)
 ```
 
 ## Annotating Clusters Using SingleR
@@ -819,7 +807,7 @@ library(SingleR)
 library(celldex)
 
 # skin reference
-ref <- BlueprintEncodeData()
+ref <- celldex::HumanPrimaryCellAtlasData()
 
 # Expression matrix
 expr <- LayerData(all_merged, layer = "data") # normalised data
@@ -866,6 +854,158 @@ ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipe
        width = 8,
        height = 6,
        dpi = 300)
+
+# After SingleR annotation
+saveRDS(all_merged, "all_merged_annotated.rds")
+```
+
+I ran annotation through the HPC using singleR, using a specific Atopic Dermatitis reference atlas from the Single Cell Portal.
+
+I first ran it using the celltype_coarse (16 categories) metadata from the reference, but now I will rerun using celltype_granular (86 categories) to get more detail on the annotations because the coarse run gave the same annotations as the immune reference.
+
+Here is the new annotation using singleR through the HPC with the granular reference **Skin Cell Atlas (SCP2738), Vorstandlechner et al. (2024)** - "A multi-modal census of the human skin" published in ***Nature Communications***.
+
+```{r}
+# Load seurat object with SingleR labels 
+all_merged <- readRDS("~/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/query_annotated.rds")
+
+# -----------UMAP CLusters-----------
+# Check the labels
+table(all_merged$SingleR.labels)
+
+# Visualise on UMAP
+SingleR_UMAP <- DimPlot(all_merged, group.by = "SingleR.labels", label = TRUE, repel = TRUE, label.size = 6) + ggtitle("SingleR Annotations Using Skin Cell Atlas (SCP2738)") + theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 18),
+        plot.title = element_text(size = 22))
+
+SingleR_UMAP
+ggsave("~/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/SingleR_UMAP.png", plot=SingleR_UMAP, width=12, height=8, dpi=300)
+
+
+# Now just looking at keratinocytes to see distrinctions
+# Define custom colours — KCs in distinct colours, others kept neutral
+custom_colours <- c(
+  "KC 1" = "#FF0000",        # red
+  "KC 2" = "#FF8C00",        # orange
+  "KC 3" = "#FFD700",        # gold
+  "KC 4" = "#00CED1",        # dark turquoise
+  "KC 5" = "#9400D3",        # purple
+  "KC cycling" = "#FF69B4",  # pink
+  "Cornified KC 1" = "#8B0000",  # dark red
+  "Cornified KC 2" = "#A0522D",  # brown
+  # keep everything else grey to focus on KCs
+  "B Naive/Mem" = "grey70",
+  "CD8+ CTL" = "grey70",
+  "DC 1" = "grey70",
+  "DC 2" = "grey70",
+  "DC 2 CD83+" = "grey70",
+  "DC 2 cycling" = "grey70",
+  "DC MMP12+" = "grey70",
+  "HF" = "grey70",
+  "ILC" = "grey70",
+  "ILC cycling" = "grey70",
+  "LDC" = "grey70",
+  "Melano IFI27 hi" = "grey70",
+  "Melano S100A4-" = "grey70",
+  "Melano S100A4+" = "grey70",
+  "mmDC" = "grey70",
+  "NK" = "grey70",
+  "Plasmablast" = "grey70",
+  "Sebaceous gland" = "grey70",
+  "Sweat gland 1" = "grey70",
+  "Sweat gland 2" = "grey70",
+  "T CREM hi" = "grey70",
+  "T CREM lo FOS lo" = "grey70",
+  "T FOS hi" = "grey70",
+  "T FOS hi cycling" = "grey70",
+  "Treg" = "grey70",
+  "Treg cycling" = "grey70",
+  "γδ T" = "grey70",
+  "NA" = "grey90"
+)
+
+# Get UMAP coordinates with cell type labels
+umap_df <- as.data.frame(all_merged@reductions$umap@cell.embeddings)
+umap_df$celltype <- all_merged$SingleR.labels
+
+# Calculate centroid positions for KC labels only
+kc_labels <- c("KC 1", "KC 2", "KC 3", "KC 4", "KC 5", "KC cycling", "Cornified KC 1", "Cornified KC 2")
+
+label_positions <- umap_df %>%
+  filter(celltype %in% kc_labels) %>%
+  group_by(celltype) %>%
+  summarise(umap_1 = median(umap_1), umap_2 = median(umap_2))
+
+# Plot without any labels
+KCs <- DimPlot(all_merged,
+             group.by = "SingleR.labels",
+             label = FALSE,
+             cols = custom_colours) +
+  ggtitle("Keratinocyte Subtypes") +
+  geom_text(data = label_positions,
+             aes(x = umap_1, y = umap_2, label = celltype),
+             size = 5) + theme(axis.title = element_text(size = 20),
+        axis.text = element_text(size = 18),
+        plot.title = element_text(size = 22))
+
+KCs
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/Keratinocytes_umap.png",
+       plot = KCs, width = 12, height = 8, dpi = 300)
+
+
+
+# ---------------Cell Type Distirbutions------------
+
+# Check quality
+pred <- readRDS("~/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/singler_predictions.rds")
+plotScoreHeatmap(pred)
+plotDeltaDistribution(pred)
+# Check how many NA cells there are
+sum(is.na(all_merged$SingleR.labels))
+
+# Cell type distribution
+# 1. Bar plot of cell type counts
+Cell_Type_Counts <- ggplot(all_merged@meta.data, aes(x = reorder(SingleR.labels, SingleR.labels, function(x) -length(x)), fill = SingleR.labels)) +
+  geom_bar() +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Cell Type Distribution Using Skin Cell Atlas (SCP2738)", x = "Cell Type", y = "Number of Cells") +
+  NoLegend()
+
+
+ggsave("~/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/Cell_Tpe_Counts.png", plot=Cell_Type_Counts, width=12, height=8, dpi=300)
+
+# 2. Cell type proportions per sample
+Cells_per_Sample <- ggplot(all_merged@meta.data, aes(x = orig.ident, fill = SingleR.labels)) +
+  geom_bar(position = "fill") +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), axis.title = element_text(size = 20),
+        axis.text = element_text(size = 18),
+        plot.title = element_text(size = 22)) +
+  labs(title = "Cell Type Proportions per Sample", x = "Sample", y = "Proportion")
+# Specifically keratinocytes defined by colour
+KCs_per_Sample <- ggplot(all_merged@meta.data, aes(x = orig.ident, fill = SingleR.labels)) +
+  geom_bar(position = "fill") +
+  scale_fill_manual(values = custom_colours) +
+  theme_classic() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        axis.title = element_text(size = 18),
+        axis.text = element_text(size = 16),
+        plot.title = element_text(size = 22)) +
+  labs(title = "Keratinocyte Proportions per Sample", x = "Sample", y = "Proportion")
+
+ggsave("~/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/Keratinocytes_Sample.png", plot=KCs_per_Sample, width=12, height=8, dpi=300)
+
+ggsave("~/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/Cells_per_Sample.png", plot=Cells_per_Sample, width=12, height=8, dpi=300)
+
+# 3. Simple table of counts and percentages
+df <- as.data.frame(table(all_merged$SingleR.labels))
+colnames(df) <- c("CellType", "Count")
+df$Percentage <- round(df$Count/sum(df$Count)*100, 2)
+df <- df[order(-df$Count),]
+df
+write.csv(df, "/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/SingleR_Annotations/cell_type_distribution.csv", row.names = FALSE)
 ```
 
 ## Finding the Most Highly Expressed Genes per Cluster —-
@@ -970,4 +1110,125 @@ ggsave("Marker_Genes/Harmony/Top_genes_heatmap.png",
        width = 14,
        height = 10,
        dpi = 300)
+```
+
+# Cellchat —————————
+
+CellChat infers cell-cell communication
+
+```{r}
+devtools::install_github("jinworks/CellChat")
+install.packages("devtools")
+devtools::install_github("thomasp85/patchwork")
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install("ComplexHeatmap")
+
+devtools::install_github('immunogenomics/presto')
+
+
+```
+
+```{r}
+library(presto)
+
+all_merged <- readRDS("all_merged_annotated.rds")
+
+# Step 1: Create CellChat object
+# Use normalised counts and SingleR annotations
+cellchat <- createCellChat(
+  object = all_merged,
+  group.by = "SingleR_annotation",
+  assay = "RNA"
+)
+
+# Step 2: Set the ligand-receptor database (human)
+CellChatDB <- CellChatDB.human
+cellchat@DB <- CellChatDB
+
+# Step 3: Subset to signalling genes only
+cellchat <- subsetData(cellchat)
+
+# Step 4: Identify overexpressed genes and interactions
+cellchat <- identifyOverExpressedGenes(cellchat)
+cellchat <- identifyOverExpressedInteractions(cellchat)
+
+# Step 5: Compute communication probabilities
+cellchat <- computeCommunProb(cellchat)
+cellchat <- filterCommunication(cellchat, min.cells = 10)
+
+# Step 6: Infer communication at pathway level
+cellchat <- computeCommunProbPathway(cellchat)
+
+# Step 7: Aggregate communication network
+cellchat <- aggregateNet(cellchat)
+
+# Step 8: Visualise - circle plot
+groupSize <- as.numeric(table(cellchat@idents))
+
+par(mfrow = c(1, 2))
+circle_count <- as.ggplot(function() 
+  netVisual_circle(cellchat@net$count,
+                   vertex.weight = groupSize,
+                   weight.scale = TRUE,
+                   label.edge = FALSE,
+                   title.name = "Number of interactions"))
+
+circle_weight <- as.ggplot(function() 
+  netVisual_circle(cellchat@net$weight,
+                   vertex.weight = groupSize,
+                   weight.scale = TRUE,
+                   label.edge = FALSE,
+                   title.name = "Interaction strength"))
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Interaction_Number.png",
+       plot = circle_count,
+       width = 8, height = 8, dpi = 300)
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Interaction_Strength.png",
+       plot = circle_weight,
+       width = 8, height = 8, dpi = 300)
+
+# Bubble plot of all communications
+netVisual_bubble(cellchat,
+                 sources.use = NULL,
+                 targets.use = NULL,
+                 remove.isolate = FALSE)
+
+# Heatmap of interactions
+install.packages("ggplotify")
+library(ggplotify)
+
+heatmap_count <- as.ggplot(function() 
+  ComplexHeatmap::draw(netVisual_heatmap(cellchat, measure = "count")))
+
+heatmap_weight <- as.ggplot(function() 
+  ComplexHeatmap::draw(netVisual_heatmap(cellchat, measure = "weight")))
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Heatmap_Count.png",
+       plot = heatmap_count,
+       width = 8, height = 8, dpi = 300)
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Heatmap_Weight.png",
+       plot = heatmap_weight,
+       width = 8, height = 8, dpi = 300)
+
+# Top pathways
+# Compute centrality scores
+cellchat <- netAnalysis_computeCentrality(cellchat)
+
+# Rank signalling pathways by strength
+gg <- rankNet(cellchat, mode = "single")
+gg
+
+ggsave("/Users/maisievarcoe/Desktop/Research Project/Rerunning Pipelines/My_Pipeline/CellChat/Ranked_Signalling.png",
+       plot = gg,
+       width = 8,
+       height = 10,
+       dpi = 300)
+```
+
+```{r}
+ncol(all_merged)
 ```
