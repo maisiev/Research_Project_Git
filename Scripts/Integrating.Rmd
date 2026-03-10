@@ -15,11 +15,11 @@ library(dplyr)
 
 ```{r}
 # ------------ Microbiome Data -------------------
-# Microbiome data
-microbiome <- read.delim("~/Desktop/iawards/metaphlan_output/metaphlan_sgb_merged_table.txt",
-                         header=TRUE,
-                         skip = 1,
-                         comment.char = "")
+# Microbiome data: species-level abundance table (already filtered, clean row names)
+microbiome <- read.csv(
+  "~/Desktop/iawards/metaphlan_output/species_abundance_table_phyloseq/species_table.csv",
+  row.names = 1
+)
 
 # ------------ Metabolomics Data -----------------
 # NMR peak area metadata, includes NMR sample IDs and peak area values for metabolites
@@ -44,7 +44,7 @@ load("~/Desktop/iawards/metadata/sample_metadata_201106.RData")
 link <- sample_metadata_201106
 ```
 
-# Tier 1: Microbiome & Metabolomics 
+# Tier 1: Microbiome & Metabolomics
 
 ## Step 1: Data Preparation
 
@@ -55,27 +55,14 @@ Build master linking table, connecting microbiome (SA abundance) to metabolomics
 ### 1.1. Extract SA Abundance from Microbiome Data
 
 ```{r}
-# ------ Put taxa names into rownames --------------
-# Set the first column as row names
-rownames(microbiome) <- microbiome$X
-microbiome$X <- NULL
-
-# Verify it worked
-head(rownames(microbiome))
-
 #------ Check for rows that have S. aureus ---------
 sa_rows <- grep("aureus", rownames(microbiome), 
                 value=TRUE, ignore.case=TRUE)
 print(sa_rows)
 
-# Check dimensions - should be 176 x 20
-dim(microbiome)
-
 # ------ Extract Species-Level SA Row-------
 # (not strain level)
-sa_row_name <- "k__Bacteria|p__Firmicutes|c__Bacilli|o__Bacillales|f__Staphylococcaceae|g__Staphylococcus|s__Staphylococcus_aureus"
-
-sa_abundance <- microbiome[sa_row_name, ]
+sa_abundance <- microbiome["s__Staphylococcus_aureus", ]
 
 # Transpose to dataframe
 sa_df <- data.frame(
@@ -118,19 +105,8 @@ Link this to sample metadata (has sample number, eg_id, sample site, lesional st
 Need to link these so that the object with SA abundance now has info on who the patient is and info about them, specifically important that the object now has eg_id which is the linking factor between all data modalities.
 
 ```{r}
-# Check the classes - one should be numeric and one character
-head(sa_linked$sample_number)
-head(sample_meta$sample_number)
-
-class(sa_linked$sample_number)
-class(sample_meta$sample_number)
-
 # Convert sample_meta sample_number to character to match sa_linked
 sample_meta$sample_number <- as.character(sample_meta$sample_number)
-
-# Verify they match now - both should be character
-class(sa_linked$sample_number)
-class(sample_meta$sample_number)
 
 # Now run the join
 sa_linked2 <- sa_linked %>%
@@ -158,10 +134,6 @@ The shotgun_patient has patient-level clinical metadata (age, sex, EASI, weeks s
 Need to link these for checking for confounders later on (e.g. age/treatment) and for downstream analyses (EASI = lesionality outcome variable).
 
 ```{r}
-# Check classes match before joining
-class(sa_linked2$eg_id)
-class(shotgun_patient$eg_id)
-
 # Join to get patient-level clinical variables
 sa_linked3 <- sa_linked2 %>%
   left_join(
@@ -182,47 +154,88 @@ sum(is.na(sa_linked3$eg_id))
 
 ### 1.5. Add NMR (Metabolite) to Microbiome Data
 
-Link each microbiome sample to its corresponding NMR sample to creat single table where each row has (SA abundance, patient ID, body, site, lesional status, clinical variables, and matching metabolomics ID).
+Link each microbiome sample to its corresponding NMR sample to create single table where each row has (SA abundance, patient ID, body, site, lesional status, clinical variables, and matching metabolomics ID).
 
 This creates the master linking table which is the foundation for all downstream analysis in Tier 1.
 
 ```{r}
-# Check classes match
-class(sa_linked3$sample_number)
-class(nmr_shotgun$sample_number)
-
-# Convert nmr_shotgun sample_number to character
+# Fix class mismatches for joins
+sample_meta$sample_number <- as.character(sample_meta$sample_number)
 nmr_shotgun$sample_number <- as.character(nmr_shotgun$sample_number)
 
-# Verify
-class(sa_linked3$sample_number)
-class(nmr_shotgun$sample_number)
+#------------ Build master linking table-----------------
+master_table <- sa_df %>%
+  # Link P22757 IDs to sample numbers via sequencing library
+  left_join(lib %>% 
+              select(Sample, `Submitted Name`),
+            by = c("sample_short" = "Sample")) %>%
+  rename(sample_number = `Submitted Name`) %>%
+  # Add sample-level metadata (eg_id, site, lesional status)
+  left_join(sample_meta %>%
+              select(sample_number, eg_id, sample_site,
+                     lesional, local_EASI_intensity,
+                     s_aureus_culture_growth_viapath),
+            by = "sample_number") %>%
+  # Add patient-level clinical variables
+  left_join(shotgun_patient %>%
+              select(eg_id, age, sex, EASI,
+                     weeks_since_last_systemic,
+                     weeks_since_last_TCS_or_TCI,
+                     days_since_any_topicals,
+                     TEWL_mean, pH_mean),
+            by = "eg_id") %>%
+  # Add NMR metabolomics sample IDs
+  left_join(nmr_shotgun %>%
+              select(sample_number, NMR_sample_id),
+            by = "sample_number")
 
-# Now run the join
-master_table <- sa_linked3 %>%
-  left_join(
-    nmr_shotgun %>%
-      select(sample_number, NMR_sample_id),
-    by = "sample_number"
-  )
-
-# Final check
-print(master_table %>%
-  select(eg_id, sample_site, lesional,
-         sa_abundance, NMR_sample_id, 
-         EASI, age, sex))
-
-sum(is.na(master_table$NMR_sample_id))
+master_table
+dim(master_table)                          # expect 20 x 18
+length(unique(master_table$eg_id))         # expect 9
+table(master_table$lesional)               # check LES/NON_LES split
+summary(master_table$sa_abundance)         # check 0-100 range
+colSums(is.na(master_table))               # check for unexpected NAs
 ```
 
 ## Step 2: Confounder Checking
 
-Plotting S. aureus abundance against age, EASI score, treatment washout, TWEL and pH across 11 patients.
+Plotting S. aureus abundance against age, EASI score, treatment washout, TWEL and pH across 9 patients. Seeing if any of the variables correlate with SA abundance.
 
 Spearman correlations.
 
-Flag anything that should be carried as a covariate.
+Flag anything that should be carried as a covariate downstream.
+
+### Aggregate to Patient Level
+
+Some samples are from the same patient, for these, merge the clinical variables to just one repeat per patient.
 
 ```{r}
+# One row per patient for visualisation only
+patient_level <- master_table %>%
+  group_by(eg_id) %>%
+  summarise(
+    mean_sa = mean(sa_abundance),
+    age = first(age),
+    sex = first(sex),
+    EASI = first(EASI),
+    weeks_since_last_systemic = first(weeks_since_last_systemic),
+    weeks_since_last_TCS_or_TCI = first(weeks_since_last_TCS_or_TCI),
+    days_since_any_topicals = first(days_since_any_topicals),
+    TEWL_mean = first(TEWL_mean),
+    pH_mean = first(pH_mean)
+  )
 
+print(patient_level)
+
+# -------- Clean Systemic Treatment -------------
+# Systemic treatment column is numeric and text -> convert to binary
+# Convert weeks_since_last_systemic to binary
+# never = no recent systemic treatment
+# anything else = had systemic treatment
+patient_level <- patient_level %>%
+  mutate(had_systemic = ifelse(
+    weeks_since_last_systemic == "never", 
+    "never", "yes"))
+
+print(patient_level %>% select(eg_id, mean_sa, had_systemic))
 ```
