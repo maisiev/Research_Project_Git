@@ -1,0 +1,69 @@
+---
+title: "Multi-Omics Integration - Maisie Varcoe"
+output: html_document
+date: "2026-03-10"
+---
+
+### Dependencies
+
+```{r}
+library(readxl)
+library(dplyr)
+```
+
+### Load Data
+
+```{r}
+# ------------ Microbiome Data -------------------
+# Microbiome data
+microbiome <- read.delim("~/Desktop/iawards/metaphlan_output/metaphlan_sgb_merged_table.txt",
+                         header=TRUE,
+                         skip = 1,
+                         comment.char = "")
+
+# ------------ Metabolomics Data -----------------
+# NMR peak area metadata, includes NMR sample IDs and peak area values for metabolites
+load("~/Desktop/iawards/NMR metabolomics/NMR_peakarea_metadata.RData")
+NMR_meta <- NMR_peakarea_metadata
+
+# ------------ Linking Files -------------------
+# Sequencing library - links P22757 IDs to sample numbers
+lib <- read_xlsx("~/Desktop/iawards/shotgun_jose_analysis/lib.xlsx")
+
+# Shotgun sample metadata - eg_id, site, lesional, local EASI
+sample_meta <- read_xlsx("~/Desktop/iawards/shotgun_jose_analysis/iawards_shotgun_sample_metadata.xlsx")
+
+# Shotgun patient metadata - age, sex, EASI, treatments
+shotgun_patient <- read_xlsx("~/Desktop/iawards/shotgun_jose_analysis/iawards_shotgun_patient_metadata.xlsx")
+
+# NMR-shotgun linking file
+nmr_shotgun <- read.csv("~/Desktop/iawards/shotgun_jose_analysis/Abundance_tables/NMR_shotgun_sample_names.csv")
+
+# Sample metadata with eg_id linking factor
+load("~/Desktop/iawards/metadata/sample_metadata_201106.RData")
+link <- sample_metadata_201106
+```
+
+# Tier 1: Microbiome & Metabolomics 
+
+## Step 1: Data Preparation
+
+Using cleaned data files, extract S. aureus abundance from metaphlan.
+
+Build master linking table, connecting microbiome (SA abundance) to metabolomics via eg_id.
+
+```{r}
+
+```
+
+## Step2: Confounder Checking
+
+Plotting S. aureus abundance against age, EASI score, treatment washout, TWEL and pH across 11 patients.
+
+Spearman correlations.
+
+Flag anything that should be carried as a covariate.
+
+```{r}
+
+```
