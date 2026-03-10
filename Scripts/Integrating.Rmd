@@ -52,11 +52,170 @@ Using cleaned data files, extract S. aureus abundance from metaphlan.
 
 Build master linking table, connecting microbiome (SA abundance) to metabolomics via eg_id.
 
-```{r}
+### 1.1. Extract SA Abundance from Microbiome Data
 
+```{r}
+# ------ Put taxa names into rownames --------------
+# Set the first column as row names
+rownames(microbiome) <- microbiome$X
+microbiome$X <- NULL
+
+# Verify it worked
+head(rownames(microbiome))
+
+#------ Check for rows that have S. aureus ---------
+sa_rows <- grep("aureus", rownames(microbiome), 
+                value=TRUE, ignore.case=TRUE)
+print(sa_rows)
+
+# Check dimensions - should be 176 x 20
+dim(microbiome)
+
+# ------ Extract Species-Level SA Row-------
+# (not strain level)
+sa_row_name <- "k__Bacteria|p__Firmicutes|c__Bacilli|o__Bacillales|f__Staphylococcaceae|g__Staphylococcus|s__Staphylococcus_aureus"
+
+sa_abundance <- microbiome[sa_row_name, ]
+
+# Transpose to dataframe
+sa_df <- data.frame(
+  sample_id = colnames(microbiome),
+  sa_abundance = as.numeric(sa_abundance)
+)
+
+# Trim sample IDs to match lib format (remove _S1_L001d_metagenome suffix)
+sa_df$sample_short <- gsub("_S[0-9]+_L001d_metagenome", "", 
+                            sa_df$sample_id)
+
+print(sa_df)
 ```
 
-## Step2: Confounder Checking
+### 1.2. Merge SA Data with Sequencing Data
+
+Joining sa_df to lib because sa_df has IDs (e.g. PXXXXX_101 with abundance X), but doesn't have patient information. So after merging with lib, it will know that patient 1 has abundance X (intermediate ID for linking to later files).
+
+```{r}
+# Join to lib to get sample_number
+sa_linked <- sa_df %>%
+  left_join(
+    lib %>% select(Sample, `Submitted Name`),
+    by = c("sample_short" = "Sample")
+  ) %>%
+  rename(sample_number = `Submitted Name`)
+
+# Check - do all 20 rows have a sample_number?
+print(sa_linked %>% select(sample_short, sample_number, sa_abundance))
+# Check for NAs
+sum(is.na(sa_linked$sample_number)) # should be 0
+```
+
+### 1.3. Join sa_linked with Sample Metadata
+
+So SA_linked now has PXXXX IDs, sample numbers and SA abundance.
+
+Link this to sample metadata (has sample number, eg_id, sample site, lesional status, local EASI score, S. aureus growth viapath)
+
+Need to link these so that the object with SA abundance now has info on who the patient is and info about them, specifically important that the object now has eg_id which is the linking factor between all data modalities.
+
+```{r}
+# Check the classes - one should be numeric and one character
+head(sa_linked$sample_number)
+head(sample_meta$sample_number)
+
+class(sa_linked$sample_number)
+class(sample_meta$sample_number)
+
+# Convert sample_meta sample_number to character to match sa_linked
+sample_meta$sample_number <- as.character(sample_meta$sample_number)
+
+# Verify they match now - both should be character
+class(sa_linked$sample_number)
+class(sample_meta$sample_number)
+
+# Now run the join
+sa_linked2 <- sa_linked %>%
+  left_join(
+    sample_meta %>% 
+      select(sample_number, eg_id, sample_site,
+             lesional, local_EASI_intensity,
+             s_aureus_culture_growth_viapath),
+    by = "sample_number"
+  )
+
+# Check - do all 20 rows have an eg_id?
+print(sa_linked2 %>% select(sample_number, eg_id, 
+                              sample_site, lesional, 
+                              sa_abundance))
+sum(is.na(sa_linked2$eg_id)) # should be 0
+```
+
+### 1.4. Join sa_linked2 to Patient Metadata
+
+So the sa_linked2 now has SA abundance, eg_id, sample site and lesional status.
+
+The shotgun_patient has patient-level clinical metadata (age, sex, EASI, weeks since last systemic, weeks since last TCS or TCI, days since any topical, TEWL mean, pH mean).
+
+Need to link these for checking for confounders later on (e.g. age/treatment) and for downstream analyses (EASI = lesionality outcome variable).
+
+```{r}
+# Check classes match before joining
+class(sa_linked2$eg_id)
+class(shotgun_patient$eg_id)
+
+# Join to get patient-level clinical variables
+sa_linked3 <- sa_linked2 %>%
+  left_join(
+    shotgun_patient %>%
+      select(eg_id, age, sex, EASI,
+             weeks_since_last_systemic,
+             weeks_since_last_TCS_or_TCI,
+             days_since_any_topicals,
+             TEWL_mean, pH_mean),
+    by = "eg_id"
+  )
+
+# Check
+print(sa_linked3 %>% select(eg_id, sample_site, lesional,
+                              sa_abundance, age, sex, EASI))
+sum(is.na(sa_linked3$eg_id))
+```
+
+### 1.5. Add NMR (Metabolite) to Microbiome Data
+
+Link each microbiome sample to its corresponding NMR sample to creat single table where each row has (SA abundance, patient ID, body, site, lesional status, clinical variables, and matching metabolomics ID).
+
+This creates the master linking table which is the foundation for all downstream analysis in Tier 1.
+
+```{r}
+# Check classes match
+class(sa_linked3$sample_number)
+class(nmr_shotgun$sample_number)
+
+# Convert nmr_shotgun sample_number to character
+nmr_shotgun$sample_number <- as.character(nmr_shotgun$sample_number)
+
+# Verify
+class(sa_linked3$sample_number)
+class(nmr_shotgun$sample_number)
+
+# Now run the join
+master_table <- sa_linked3 %>%
+  left_join(
+    nmr_shotgun %>%
+      select(sample_number, NMR_sample_id),
+    by = "sample_number"
+  )
+
+# Final check
+print(master_table %>%
+  select(eg_id, sample_site, lesional,
+         sa_abundance, NMR_sample_id, 
+         EASI, age, sex))
+
+sum(is.na(master_table$NMR_sample_id))
+```
+
+## Step 2: Confounder Checking
 
 Plotting S. aureus abundance against age, EASI score, treatment washout, TWEL and pH across 11 patients.
 
