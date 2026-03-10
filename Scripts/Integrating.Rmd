@@ -9,6 +9,12 @@ date: "2026-03-10"
 ```{r}
 library(readxl)
 library(dplyr)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+library(phyloseq)
+library(vegan)
+library(tibble)
 ```
 
 ### Load Data
@@ -20,6 +26,8 @@ microbiome <- read.csv(
   "~/Desktop/iawards/metaphlan_output/species_abundance_table_phyloseq/species_table.csv",
   row.names = 1
 )
+# Load phyloseq object
+load("~/Desktop/iawards/metaphlan_output/species_abundance_table_phyloseq/physeq.RData")
 
 # ------------ Metabolomics Data -----------------
 # NMR peak area metadata, includes NMR sample IDs and peak area values for metabolites
@@ -205,7 +213,7 @@ Spearman correlations.
 
 Flag anything that should be carried as a covariate downstream.
 
-### Aggregate to Patient Level
+### 2.1. Aggregate to Patient Level
 
 Some samples are from the same patient, for these, merge the clinical variables to just one repeat per patient.
 
@@ -238,4 +246,213 @@ patient_level <- patient_level %>%
     "never", "yes"))
 
 print(patient_level %>% select(eg_id, mean_sa, had_systemic))
+```
+
+### 2.2. Confounder Plots
+
+Plotting variables to see if any associate with S. aureus levels.
+
+Using scatter plots with spearman R value displayed on plots via stat_cor for visual correlation.
+
+```{r}
+patient_level <- patient_level %>%
+  mutate(
+    TEWL_mean = as.numeric(ifelse(TEWL_mean == "none", NA, TEWL_mean)),
+    pH_mean = as.numeric(ifelse(pH_mean == "none", NA, pH_mean)),
+    days_since_any_topicals = as.numeric(ifelse(days_since_any_topicals == "none", NA, days_since_any_topicals))
+  )
+
+# Plot theme
+my_theme <- my_theme +
+  theme(
+    plot.title = element_text(size = 16, face = "bold"),
+    axis.title = element_text(size = 16),
+    axis.text = element_text(size = 16),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+# ---- Continuous confounders ----
+# Age vs SA
+age_SA <- ggplot(patient_level, aes(x = age, y = mean_sa)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size=6) +
+  labs(title = "Age vs SA Abundance",
+       x = "Age", y = "Mean SA Abundance (%)") +
+  my_theme
+
+# EASI vs SA
+EASI_SA <- ggplot(patient_level, aes(x = EASI, y = mean_sa)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size=6) +
+  labs(title = "EASI vs SA Abundance",
+       x = "EASI Score", y = "Mean SA Abundance (%)") +
+  my_theme
+
+# weeks since TCS vs SA
+TCA_SA <- ggplot(patient_level, aes(x = weeks_since_last_TCS_or_TCI, y = mean_sa)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size=6) +
+  labs(title = "Weeks Since TCS/TCI vs SA Abundance",
+       x = "Weeks Since Last TCS/TCI", y = "Mean SA Abundance (%)") +
+  my_theme
+
+# days since topicals vs SA
+top_SA <- ggplot(patient_level, aes(x = days_since_any_topicals, y = mean_sa)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size=6) +
+  labs(title = "Days Since Any Topicals vs SA Abundance",
+       x = "Days Since Any Topicals", y = "Mean SA Abundance (%)") +
+  my_theme
+
+# TEWL vs SA
+TEWL_SA <- ggplot(patient_level, aes(x = TEWL_mean, y = mean_sa)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size=6) +
+  labs(title = "TEWL vs SA Abundance",
+       x = "TEWL Mean", y = "Mean SA Abundance (%)") +
+  my_theme
+
+# pH vs SA
+PH_SA <- ggplot(patient_level, aes(x = pH_mean, y = mean_sa)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size=6) +
+  labs(title = "pH vs SA Abundance",
+       x = "pH Mean", y = "Mean SA Abundance (%)") +
+  my_theme
+
+# ---- Categorical confounder ----
+# Systemic treatment vs SA
+sys_SA <- ggplot(patient_level, aes(x = had_systemic, y = mean_sa)) +
+  geom_boxplot(outlier.shape = NA) +
+  geom_jitter(width = 0.1, size = 3) +
+  labs(title = "Systemic Treatment vs SA Abundance",
+       x = "Had Systemic Treatment", 
+       y = "Mean SA Abundance (%)") +
+  my_theme
+
+# ---- Combine all plots ----
+(age_SA + EASI_SA + TCA_SA) / (top_SA + TEWL_SA + PH_SA) / (sys_SA + plot_spacer() + plot_spacer())
+
+# Save combined plot
+ggsave("~/Desktop/Research_Project/Scripts/Integration/confounder_plots.png", 
+       plot = (age_SA + EASI_SA + TCA_SA) / (top_SA + TEWL_SA + PH_SA) / (sys_SA + plot_spacer() + plot_spacer()),
+       width = 15, 
+       height = 12, 
+      
+       dpi = 300)
+
+```
+
+### 2.3. Spearman Correlation
+
+```{r}
+# Run Spearman correlations for each continuous variable
+# Excluding days since topicals (SD=0 so correlation is impossible)
+confounders <- c("age", "EASI", "weeks_since_last_TCS_or_TCI", 
+                 "TEWL_mean", "pH_mean")
+
+# Run cor.test for each and extract rho and p-value
+spearman_results <- lapply(confounders, function(var) {
+  test <- cor.test(patient_level$mean_sa, 
+                   patient_level[[var]], 
+                   method = "spearman",
+                   use = "complete.obs")
+  data.frame(
+    variable = var,
+    rho = round(test$estimate, 3),
+    p_value = round(test$p.value, 3)
+  )
+}) %>% bind_rows
+rownames(spearman_results) <- NULL
+
+print(spearman_results)
+```
+
+## Step 3: Confirm S. Aureus Structures the Microbiome Composition
+
+Phyloseq object with samples and taxa that matches the species table.
+
+### 3.1. Add the metadata and SA high/low grouping 
+
+The SA distribution is heavily skewed towards high SA - 16 out of 20 samples have SA above 30%. This means a simple median split at 67% gives you 10 high and 10 low, which is balanced, but the "low" group still has quite high SA values (up to 67%).
+
+I will use the median split for the formal PERMANOVA then use continuous SA abundance in the Mantel test which avoids the binary split problem.
+
+```{r}
+# Create metadata dataframe matched to phyloseq sample names
+
+# Match master_table to phyloseq sample names using sample_id
+physeq_meta <- master_table %>%
+  select(sample_id, eg_id, sample_site, lesional, 
+         sa_abundance, EASI, age, sex,
+         weeks_since_last_TCS_or_TCI,
+         TEWL_mean, pH_mean) %>%
+  column_to_rownames("sample_id")
+
+# Add metadata to phyloseq object
+sample_data(physeq) <- sample_data(physeq_meta)
+
+# ------- S. Aureus high/low Grouping ---------
+# Median split for PERMANOVA
+median_sa <- median(sample_data(physeq)$sa_abundance)
+cat("Median SA abundance:", median_sa, "\n")
+
+sample_data(physeq)$sa_group <- ifelse(
+  sample_data(physeq)$sa_abundance >= median_sa,
+  "SA_high", "SA_low")
+
+table(sample_data(physeq)$sa_group)
+```
+
+### 3.2. PERMANOVA
+
+PERMANOVA confirms that the microbiome composition differs by SA high/low.
+
+```{r}
+# Extract OTU table and metadata
+otu_mat <- as.data.frame(otu_table(physeq))
+
+# Transpose if necessary - vegan needs samples as rows
+if(taxa_are_rows(physeq)){
+  otu_mat <- t(otu_mat)
+}
+
+meta <- data.frame(sample_data(physeq))
+
+# Calculate Bray-Curtis distance matrix
+bray_dist <- vegdist(otu_mat, method = "bray")
+
+# PERMANOVA with SA group, blocking by patient
+set.seed(123)
+permanova_result <- adonis2(
+  bray_dist ~ sa_group,
+  data = meta,
+  permutations = 999,
+  strata = meta$eg_id # Accounts for fact that multiple samples come from same patient
+)
+
+print(permanova_result)
+```
+
+### 3.3. Mantel Test (with continuous S. aureus variable)
+
+This uses continuous SA rather than binary split to complement the PERMANOVA result. If both agree = robust.
+
+```{r}
+# Mantel test - continuous SA vs microbiome distance
+# Build SA distance matrix
+sa_dist <- dist(meta$sa_abundance)
+
+# Run Mantel test
+set.seed(123)
+mantel_result <- mantel(bray_dist, sa_dist,
+                        method = "spearman",
+                        permutations = 999)
+
+print(mantel_result)
 ```
