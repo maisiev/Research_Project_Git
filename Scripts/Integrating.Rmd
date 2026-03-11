@@ -651,17 +651,130 @@ mofa_obj <- run_mofa(mofa_obj, use_basilisk = TRUE)
 saveRDS(mofa_obj, 
         file = "~/Desktop/Research_Project/Scripts/Integration/mofa_model.rds")
 
+# ------- Visualisations -----------------
 # Check the trained model
 print(mofa_obj)
 
 # Plot variance explained by each factor in each modality
-plot_variance_explained(mofa_obj)
+p1 <- plot_variance_explained(mofa_obj)
 
 # Plot total variance explained
-plot_variance_explained(mofa_obj, plot_total = TRUE)
+p2 <- plot_variance_explained(mofa_obj, plot_total = TRUE)
 
 # Extract factor scores
 factors <- get_factors(mofa_obj)[[1]]
 dim(factors)  # should be 18 samples x 4 factors
 head(factors)
+
+# Save plots
+ggsave("~/Desktop/Research_Project/Scripts/Integration/mofa_variance_total.png",
+       plot = p2,
+       width = 6, height = 5, dpi = 300)
+
+ggsave("~/Desktop/Research_Project/Scripts/Integration/mofa_variance_per_factor.png",
+       plot = p1,
+       width = 6, height = 5, dpi = 300)
+
+write.csv(factors, 
+          file = "~/Desktop/iawards/mofa_factor_scores.csv",
+          row.names = TRUE)
+
+```
+
+### 4.3. Correlate Factor Scores with S. Aureus Abundance
+
+Correlate MOFA+ factor scores with SA abundance to identify which factor tracks with SA.
+
+**Why do this? -\>** MOFA+ factors are hidden variables capturing a pattern of co-variation across data. When factors is correlated with SA abundance and score consistently high it means samples from SA high patients tend to score high on factor X (vice versa for low SA). Which would mean the biological variation captured by factor X tracks with SA abundance. Finding out this would help you answer the biological story of what changes in the microbiome and metabolome when SA is high.
+
+So the Spearman correlation are between each factor's score with SA and EASI (lesionality). For each factor (1-4), across all 18 samples, asking if that samples score on that factor track with how much SA that sample has.
+
+```{r}
+# Add SA abundance to factors dataframe
+factors_df <- as.data.frame(factors)
+factors_df$sa_abundance <- master_table$sa_abundance[
+  match(rownames(factors_df), master_table$NMR_sample_id)
+]
+factors_df$EASI <- master_table$EASI[
+  match(rownames(factors_df), master_table$NMR_sample_id)
+]
+factors_df$lesional <- master_table$lesional[
+  match(rownames(factors_df), master_table$NMR_sample_id)
+]
+
+# Spearman correlations with SA
+sa_cors <- cor(factors_df[, 1:4], 
+               factors_df$sa_abundance,
+               method = "spearman",
+               use = "complete.obs")
+
+print(sa_cors)
+
+# Spearman correlations with EASI (lesionality)
+easi_cors <- cor(factors_df[, 1:4],
+                 factors_df$EASI,
+                 method = "spearman",
+                 use = "complete.obs")
+
+print(easi_cors)
+
+# finding p values 
+# Run cor.test for each factor against SA and EASI
+for(f in paste0("Factor", 1:4)) {
+  cat("\n---", f, "---\n")
+  
+  sa_test <- cor.test(factors_df[[f]], 
+                      factors_df$sa_abundance,
+                      method = "spearman")
+  cat("SA:   rho =", round(sa_test$estimate, 3),
+      "  p =", round(sa_test$p.value, 3), "\n")
+  
+  easi_test <- cor.test(factors_df[[f]], 
+                        factors_df$EASI,
+                        method = "spearman")
+  cat("EASI: rho =", round(easi_test$estimate, 3),
+      "  p =", round(easi_test$p.value, 3), "\n")
+}
+write.csv(sa_cors, 
+          file = "~/Desktop/Research_Project/Scripts/Integration/SA_correlations.csv",
+          row.names = TRUE)
+write.csv(easi_cors, 
+          file = "~/Desktop/Research_Project/Scripts/Integration/EASI_correlations.csv",
+          row.names = TRUE)
+
+
+```
+
+Exploring the factors
+
+```{r}
+# ------ Inspecting Feature Weights -----
+# Visualises distribution of feature weights for a given factor
+plot_weights(
+  mofa_obj, 
+  view = "species", 
+  factor = 3, 
+  nfeatures = 10, scale=TRUE
+)
+plot_weights(
+  mofa_obj, 
+  view = "metabolites", 
+  factor = 3, 
+  nfeatures = 10, scale=TRUE
+)
+
+# Plots top n features with the highest absolute loading value
+# for a specific factor
+# Good for identifying the main drivers of a factor
+plot_top_weights(mofa_obj, 
+  view = "metabolites", 
+  factor = 3, 
+  nfeatures = 10, scale=TRUE
+)
+plot_top_weights(mofa_obj, 
+  view = "metabolites", 
+  factor = 3, 
+  nfeatures = 10, scale=TRUE
+)
+
 ```
