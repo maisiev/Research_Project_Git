@@ -7,6 +7,12 @@ date: "2026-03-10"
 ### Dependencies
 
 ```{r}
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+BiocManager::install("MOFA2")
+```
+
+```{r}
 library(readxl)
 library(dplyr)
 library(ggplot2)
@@ -15,6 +21,7 @@ library(patchwork)
 library(phyloseq)
 library(vegan)
 library(tibble)
+library(MOFA2)
 ```
 
 ### Load Data
@@ -263,7 +270,7 @@ patient_level <- patient_level %>%
   )
 
 # Plot theme
-my_theme <- my_theme +
+my_theme <-
   theme(
     plot.title = element_text(size = 16, face = "bold"),
     axis.title = element_text(size = 16),
@@ -377,7 +384,7 @@ print(spearman_results)
 
 Phyloseq object with samples and taxa that matches the species table.
 
-### 3.1. Add the metadata and SA high/low grouping 
+### 3.1. Add the metadata and SA high/low grouping
 
 The SA distribution is heavily skewed towards high SA - 16 out of 20 samples have SA above 30%. This means a simple median split at 67% gives you 10 high and 10 low, which is balanced, but the "low" group still has quite high SA values (up to 67%).
 
@@ -455,4 +462,206 @@ mantel_result <- mantel(bray_dist, sa_dist,
                         permutations = 999)
 
 print(mantel_result)
+```
+
+### 3.4. Alpha Diversity
+
+Alpha diversity = measuring the diversity within a single sample = how many different species are present and how evenly distributed are they. One number per sample summarises its complexity.
+
+Measuring:
+
+1.  **Observed (richness)** - counts how many different species are present in a sample (doesn't measure abundance)
+2.  **Shannon diversity** - accounts for both number of species present and how evenly distributed their abundances are.
+
+Will correlate each sample's alpha diversity score with its SA abundance using Spearman's correlation. (Sig correlation if SA high samples have lower diversity than SA low samples).
+
+Shannon and Richness:
+
+```{r}
+# Calculate alpha diversity
+# Note: singleton warning expected for MetaPhlAn relative abundance data
+# MetaPhlAn does not produce count data so absence of singletons is normal
+alpha_div <- estimate_richness(physeq, 
+                               measures = c("Shannon", "Observed"))
+
+# Add SA abundance and patient ID
+alpha_div$sa_abundance <- meta$sa_abundance
+alpha_div$eg_id <- meta$eg_id
+alpha_div$sa_group <- meta$sa_group
+
+# Spearman correlations
+shannon_cor <- cor.test(alpha_div$sa_abundance, 
+                        alpha_div$Shannon,
+                        method = "spearman")
+
+richness_cor <- cor.test(alpha_div$sa_abundance,
+                         alpha_div$Observed,
+                         method = "spearman")
+
+cat("Shannon vs SA - rho:", round(shannon_cor$estimate, 3),
+    "p:", format(shannon_cor$p.value, scientific = TRUE, digits = 3), "\n")
+cat("Richness vs SA - rho:", round(richness_cor$estimate, 3),
+    "p:", format(richness_cor$p.value, scientific = TRUE, digits = 3), "\n")
+```
+
+Plot Alpha Diversity:
+
+```{r}
+p_shannon <- ggplot(alpha_div, aes(x = sa_abundance, y = Shannon)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+  labs(title = "Shannon Diversity vs SA Abundance",
+       x = "SA Abundance (%)", y = "Shannon Diversity") +
+  theme_classic() +
+  my_theme
+
+p_richness <- ggplot(alpha_div, aes(x = sa_abundance, y = Observed)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+  labs(title = "Species Richness vs SA Abundance",
+       x = "SA Abundance (%)", y = "Observed Species") +
+  theme_classic() +
+  my_theme
+
+p_shannon + p_richness
+
+ggsave("~/Desktop/Research_Project/Scripts/Integration/alpha_diversity_plots.png",
+       plot = p_shannon + p_richness,
+       width = 12, height = 5, dpi = 300)
+```
+
+## Step 4: MOFA+
+
+MOFA+ finds latent factors between data groups, allowing you to then correlate these factors with SA abundance or lesionality to see if the data types co-vary.
+
+### 4.1. Prepare and Align Data
+
+```{r}
+# Notes:
+# - GYECZ1193 BACK samples excluded - no NMR data available
+# - GYECZ0776 and GYECZ1111 excluded - no microbiome data
+# - Final aligned dataset: 18 samples
+
+# ------- Prepare NMR metabolomics matrix --------------
+# Set sample IDs as row names and clean metabolite names
+rownames(NMR_peakarea_metadata) <- NMR_peakarea_metadata$NMR_sample_id
+NMR_peakarea_metadata$NMR_sample_id <- NULL
+colnames(NMR_peakarea_metadata) <- gsub("'", "", colnames(NMR_peakarea_metadata))
+
+# --------- Prepare species matrix ---------------
+# Transpose so samples are rows, replace P22757 IDs with NMR sample IDs
+species_matched <- t(microbiome)
+rownames(species_matched) <- master_table$NMR_sample_id[
+  match(rownames(species_matched), master_table$sample_id)
+]
+
+# --- Align both matrices to shared samples ---
+# Keep only samples present in both matrices
+# Excludes GYECZ1193 BACK (no NMR data) and duplicate introduced
+# by incorrect linking of GYECZ1193.BACK to GYECZ1197 NMR IDs
+keep_samples <- rownames(species_matched)[
+  rownames(species_matched) %in% rownames(NMR_peakarea_metadata) &
+  !grepl("GYECZ1193.BACK", rownames(species_matched))
+]
+
+species_matched <- species_matched[keep_samples, ]
+nmr_matched <- NMR_peakarea_metadata[keep_samples, ]
+
+# Sanity checks
+dim(species_matched)                                     # 18 x 45
+dim(nmr_matched)                                         # 18 x 122
+all(rownames(species_matched) == rownames(nmr_matched))  # TRUE
+```
+
+### 4.2. MOFA+
+
+```{r}
+# ------- Create MOFA+ Object ------------------
+# Extract metabolite columns only (first 38 columns)
+metabolite_cols <- colnames(NMR_peakarea_metadata)[1:38]
+
+# Subset to metabolites only
+nmr_metabolites <- NMR_peakarea_metadata[, metabolite_cols]
+
+# Convert to numeric
+nmr_metabolites <- apply(nmr_metabolites, 2, as.numeric)
+rownames(nmr_metabolites) <- rownames(NMR_peakarea_metadata)
+
+# Subset to matched samples
+nmr_matched <- nmr_metabolites[rownames(species_matched), ]
+
+# Verify
+dim(nmr_matched)   # should be 18 x 38
+class(nmr_matched[1,1])  # should be numeric
+all(rownames(species_matched) == rownames(nmr_matched))
+
+
+# MOFA+ needs features as rows, samples as columns
+mofa_data <- list(
+  species = t(as.matrix(species_matched)),
+  metabolites = t(as.matrix(nmr_matched))
+)
+
+# Verify - should be features x samples
+lapply(mofa_data, dim)
+# species should be 45 x 18
+# metabolites should be 38 x 18
+
+# Create MOFA object
+mofa_obj <- create_mofa(mofa_data)
+print(mofa_obj)
+
+# Visualise data overview
+plot_data_overview(mofa_obj)
+
+# -------- Train MOFA+ Model --------------
+# Set data options
+data_opts <- get_default_data_options(mofa_obj)
+print(data_opts)
+
+# Set model options - number of factors
+model_opts <- get_default_model_options(mofa_obj)
+model_opts$num_factors <- 4  # 4 factors of of only 18 samples
+print(model_opts)
+
+# Set training options
+train_opts <- get_default_training_options(mofa_obj)
+train_opts$seed <- 123
+print(train_opts)
+
+# Scale views - important since species (0-100%) and 
+# NMR peak areas are on different scales
+data_opts$scale_views <- TRUE
+
+# Prepare the model
+mofa_obj <- prepare_mofa(
+  object = mofa_obj,
+  data_options = data_opts,
+  model_options = model_opts,
+  training_options = train_opts
+)
+
+# Train the model
+# Train using basilisk to handle Python dependencies automatically
+mofa_obj <- run_mofa(mofa_obj, use_basilisk = TRUE)
+
+# Save the trained MOFA object as RDS
+saveRDS(mofa_obj, 
+        file = "~/Desktop/Research_Project/Scripts/Integration/mofa_model.rds")
+
+# Check the trained model
+print(mofa_obj)
+
+# Plot variance explained by each factor in each modality
+plot_variance_explained(mofa_obj)
+
+# Plot total variance explained
+plot_variance_explained(mofa_obj, plot_total = TRUE)
+
+# Extract factor scores
+factors <- get_factors(mofa_obj)[[1]]
+dim(factors)  # should be 18 samples x 4 factors
+head(factors)
 ```
