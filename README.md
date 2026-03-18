@@ -1,7 +1,7 @@
 # Multi-Omics Data Integration 
 
 
-Multi-omics data integration exploring metabolite-microbiome-host interactions in Atopic Dermatitis, focussing on the effct of S.Aureus and lesional and non-lesional skin from a clinical dataset.
+Multi-omics data integration exploring metabolite-microbiome-host interactions in Atopic Dermatitis, focussing on the effect of _S.Aureus_ and lesional and non-lesional skin from a clinical dataset.
 
 ## Requirements
 
