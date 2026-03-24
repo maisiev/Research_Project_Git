@@ -28,7 +28,7 @@ library(pheatmap)
 library(lme4)
 library(lmerTest)
 library(compositions)
-
+library(MultiAssayExperiment)
 ```
 
 ### Load Data
@@ -1807,41 +1807,38 @@ MOFA+ finds latent factors between data groups, allowing you to then correlate t
 ### 4.1. Preprocessing & Feature Selection
 
 ```{r}
-# ---- PQN normalisation function ----
-# Probabilistic quotient normalisation for NMR peak area data
-# Corrects for between-sample concentration differences
-pqn_normalise <- function(mat) {
-  reference  <- apply(mat, 2, median) 
-  quotients  <- sweep(mat, 2, reference, "/")
-  dilution   <- apply(quotients, 1, median, na.rm = TRUE)
-  normalised <- sweep(mat, 1, dilution, "/")
-  return(normalised)
+# 1. ---- Alignment and Subsetting (FIXED) ----
+
+# Ensure species_matched is oriented correctly (Samples as Rows)
+# Your diagnostic showed it was 18x44, which is correct (Samples x Species),
+# but let's make it robust.
+if (nrow(species_matched) == 44) { 
+  species_matched <- t(species_matched) 
 }
 
-# ------ Alignment and Subsetting -------
-# 1. Clean NMR
-metabolite_cols <- colnames(NMR_peakarea_metadata)[1:38]
-nmr_raw <- as.matrix(apply(NMR_peakarea_metadata[, metabolite_cols], 2, as.numeric))
-rownames(nmr_raw) <- rownames(NMR_peakarea_metadata)
-
-# 2. Clean Pathways (Remove empty samples)
+# Clean Pathways (Remove empty samples)
 pathway_clean <- pathway_matched[rowSums(pathway_matched) > 0, ]
 
-# 3. Find Common Samples
+# Find Common Samples across all three
 common_samples <- Reduce(intersect, list(
   rownames(nmr_raw),
   rownames(species_matched),
   rownames(pathway_clean)
 ))
 
-# 4. Final Subsetting
+# Final Subsetting
 nmr_sub     <- nmr_raw[common_samples, ]
 species_sub <- species_matched[common_samples, ]
 pathway_sub <- pathway_clean[common_samples, ]
 
-# -------- Transformation & Feature Selection ---------
-# Address the compositional constraints and skewness
-# --- Microbiome: CLR ---
+# 2. ---- Transformation & Feature Selection ----
+
+# --- Microbiome: CLR + Prevalence (Adjusted) ---
+prevalence    <- colMeans(species_sub > 0)          
+# If you want to keep all 44, use prevalence > 0. 
+# If you use 0.20, you will go back to 5 species.
+species_sub   <- species_sub[, prevalence > 0]  
+
 species_final <- as.data.frame(clr(species_sub + 0.5))
 species_final <- species_final[, apply(species_final, 2, var) > 0]
 
@@ -1849,22 +1846,79 @@ species_final <- species_final[, apply(species_final, 2, var) > 0]
 nmr_pqn   <- pqn_normalise(nmr_sub)
 nmr_final <- as.data.frame(log1p(nmr_pqn))
 
-# --- Pathways: TSS + Feature Selection ---
-pathway_norm <- pathway_sub / rowSums(pathway_sub)
-pathway_var  <- apply(pathway_norm, 2, var)
-top_50_path  <- names(sort(pathway_var, decreasing = TRUE)[1:50])
-pathway_final <- pathway_norm[, top_50_path]
+# --- Pathways: TSS + prevalence filter ---
+pathway_norm  <- pathway_sub / rowSums(pathway_sub)
+pathway_prev  <- colMeans(pathway_norm > 0)
+pathway_final <- pathway_norm[, pathway_prev >= 0.20]
 
-# Final alignment check
+# 3. ---- Scaling and Verification ----
+species_final  <- scale(species_final)
+nmr_final      <- scale(nmr_final)
+pathway_final  <- scale(pathway_final)
+
 stopifnot(all(rownames(species_final) == rownames(nmr_final)))
-stopifnot(all(rownames(species_final) == rownames(pathway_final)))
+
+# 4. ---- Create the MAE object ----
+nmr_se     <- SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final))))
+species_se  <- SummarizedExperiment(assays = list(data = t(as.matrix(species_final))))
+pathway_se  <- SummarizedExperiment(assays = list(data = t(as.matrix(pathway_final))))
+
+mae_data <- MultiAssayExperiment(
+  experiments = ExperimentList(
+    metabolites = nmr_se,
+    species     = species_se,
+    pathways    = pathway_se
+  )
+)
+
+# 1. Prepare the metadata: Ensure row names match the sample names in your assays
+# We use the NMR_sample_id as the primary key since your assays use these as colnames
+metadata_for_mae <- master_table %>%
+  filter(!is.na(NMR_sample_id)) %>%
+  distinct(NMR_sample_id, .keep_all = TRUE) %>%
+  column_to_rownames("NMR_sample_id")
+
+# 2. Reorder metadata to match the columns of your experiments
+metadata_for_mae <- metadata_for_mae[colnames(mae_data[[1]]), ]
+
+# 3. Assign to the MAE colData slot
+colData(mae_data) <- DataFrame(metadata_for_mae)
+
+# High-level summary
+mae_data
+
+# Check dimensions of each experiment inside the MAE
+experiments(mae_data) |> lapply(dim)
+
+# Check if all assays have the exact same sample names in the same order
+all(colnames(mae_data[[1]]) == colnames(mae_data[[2]]))
+all(colnames(mae_data[[2]]) == colnames(mae_data[[3]]))
+
+# View the sample map (how MAE connects samples across assays)
+sampleMap(mae_data)
+
+# Pick a random assay (e.g., metabolites)
+test_mat <- assay(mae_data[["metabolites"]])
+
+# After scale(), the mean of each feature (row) should be ~0
+hist(rowMeans(test_mat), main="Distribution of Row Means (Should be ~0)")
+
+# Check for any remaining NAs that might crash downstream models
+any(is.na(test_mat))
+
+# See the first few species names and sample names
+rownames(mae_data[["species"]])[1:5]
+colnames(mae_data[["species"]])[1:5]
+
+# Confirm the number of species is exactly what you expect
+nrow(mae_data[["species"]])
 ```
 
 ### 4.2. Train MOFA+ Model
 
 ```{r}
 # ==============================================================================
-# MOFA+ 10-FACTOR HIGH-RES PIPELINE (V6.8)
+# MOFA+ 10-FACTOR HIGH-RES PIPELINE 
 # ==============================================================================
 
 # 1. INITIALIZE & PREPARE
@@ -1881,9 +1935,9 @@ mofa_obj_init <- prepare_mofa(
 # Set the 10-factor resolution
 mofa_obj_init@data_options$scale_views    <- TRUE
 mofa_obj_init@model_options$num_factors   <- 10
-mofa_obj_init@training_options$convergence_mode <- "fast"
+mofa_obj_init@training_options$convergence_mode <- "medium"
 
-# --- 5. STABILITY LOOP (V6.9: THE FINAL STRETCH) ---
+# --- 5. STABILITY LOOP ---
 n_inits   <- 3
 best_elbo <- -Inf
 best_model <- NULL
@@ -1892,7 +1946,7 @@ for (i in 1:n_inits) {
   cat("\n--- Running 10-Factor Init", i, "of", n_inits, "---\n")
   
   tmp_obj <- mofa_obj_init
-  tmp_obj@training_options$seed    <- 123 + i
+  tmp_obj@training_options$seed    <- 356 + i
   
   # Create a named temp file so we can find it to load it back
   temp_hdf5 <- tempfile(fileext = ".hdf5")
@@ -1929,127 +1983,220 @@ if (!is.null(best_model)) {
 ### Sensitivity & Robustness Checks
 
 ```{r}
-# 1. PREPARE THE "CLEAN" DATA (N=15)
+# ==============================================================================
+# SENSITIVITY ANALYSIS — MOFA+ WITHOUT OUTLIERS (N=15)
+# ===========
+# 1. PREPARE THE "CLEAN" DATA (N=14)
 # ------------------------------------------------------------------------------
-outliers_to_drop <- c("GYECZ1187", "GYECZ1197")
-mae_clean <- mae_data[, !colnames(mae_data) %in% outliers_to_drop, ]
+patients_to_drop <- c("GYECZ1187", "GYECZ1197")
+keep_logic <- !(mae_data$eg_id %in% patients_to_drop)
+mae_clean <- mae_data[, keep_logic, ]
 
-# 2. TRAIN THE SENSITIVITY MODEL (Corrected Option Passing)
+# --- CRITICAL: CLEAN DATA BEFORE INITIALISING MOFA ---
+# Identify and remove pathways that have ZERO variance in these 14 samples
+pw_data <- assay(mae_clean[["pathways"]])
+bad_features <- which(apply(pw_data, 1, var) == 0)
+
+if(length(bad_features) > 0) {
+  cat("Warning: Found", length(bad_features), "pathways with zero variance. Removing...\n")
+  mae_clean <- mae_clean[-bad_features, , "pathways"]
+}
+
+# 2. INITIALISE BASE OBJECT (Using the now-clean mae_clean)
 # ------------------------------------------------------------------------------
-# Create the base object
-mofa_clean_init <- create_mofa(mae_clean)
+mofa_clean_base <- create_mofa(mae_clean)
 
-# Get FRESH default templates for THIS specific object (N=15)
-data_opts_clean  <- get_default_data_options(mofa_clean_init)
-model_opts_clean <- get_default_model_options(mofa_clean_init)
-train_opts_clean <- get_default_training_options(mofa_clean_init)
+data_opts_clean  <- get_default_data_options(mofa_clean_base)
+model_opts_clean <- get_default_model_options(mofa_clean_base)
+train_opts_clean <- get_default_training_options(mofa_clean_base)
 
-# Apply your specific 10-factor settings to these fresh templates
-data_opts_clean$scale_views    <- TRUE
-model_opts_clean$num_factors   <- 10
-train_opts_clean$seed          <- 42
-train_opts_clean$convergence_mode <- "fast"
+data_opts_clean$scale_views         <- TRUE
+model_opts_clean$num_factors        <- 3  # The absolute minimum for stability
+train_opts_clean$convergence_mode   <- "fast"
+train_opts_clean$maxiter            <- 500
 
-# Now prepare - this avoids the 'incorrectly specified' error
-mofa_clean_init <- prepare_mofa(
-  object = mofa_clean_init,
-  data_options = data_opts_clean,
-  model_options = model_opts_clean,
+mofa_clean_base <- prepare_mofa(
+  object           = mofa_clean_base,
+  data_options     = data_opts_clean,
+  model_options    = model_opts_clean,
   training_options = train_opts_clean
 )
 
-# 3. RUN & LOAD
+# 3. STABILITY LOOP 
 # ------------------------------------------------------------------------------
-temp_hdf5_clean <- tempfile(fileext = "_clean.hdf5")
-mofa_clean_init@training_options$outfile <- temp_hdf5_clean
+n_inits          <- 3
+best_elbo_clean  <- -Inf
+best_model_clean <- NULL
 
-cat("\n--- Running Sensitivity Model (N=15) ---\n")
-run_mofa(mofa_clean_init, use_basilisk = TRUE)
+for (i in 1:n_inits) {
+  cat("\n--- Running Sensitivity Init", i, "of", n_inits, "---\n")
+  
+  # Ensure Python options are fresh for each run
+  tmp_obj <- mofa_clean_base
+  tmp_obj@training_options$seed <- 123 + i
+  
+  try({
+    trained <- run_mofa(tmp_obj, use_basilisk = TRUE)
+    current_elbo <- as.numeric(tail(trained@training_stats$elbo, 1))
+    
+    if (!is.na(current_elbo) && is.finite(current_elbo) && current_elbo > best_elbo_clean) {
+      best_elbo_clean  <- current_elbo
+      best_model_clean <- trained
+      cat(">>> New Best Sensitivity Model! ELBO:", round(best_elbo_clean, 2), "\n")
+    }
+  })
+}
 
-# Use load_model to bring it into R memory safely
-model_clean <- load_model(temp_hdf5_clean)
-
-# 4. THE ROBUSTNESS CHECK
+# 4. ROBUSTNESS CHECK — COMPARE WEIGHTS ACROSS ALL VIEWS & FACTORS 1-2
 # ------------------------------------------------------------------------------
-# Load your Full 10-factor model
-model_full <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_v4_BEST.rds")
+model_full <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_10_factors_FINAL.rds")
 
-# Compare Weights for Factor 1 (Species View)
-w_full  <- get_weights(model_full, views="species", factors=1)[[1]]
-w_clean <- get_weights(model_clean, views="species", factors=1)[[1]]
+cat("ROBUSTNESS SCORES (Full vs Sensitivity)\n")
 
-common_feats <- intersect(rownames(w_full), rownames(w_clean))
-robustness_score <- cor(w_full[common_feats, 1], w_clean[common_feats, 1])
+for (f in 1:2) {
+  for (v in c("species", "metabolites", "pathways")) {
+    w_full  <- get_weights(model_full,        views = v, factors = f)[[1]]
+    w_clean <- get_weights(best_model_clean,  views = v, factors = f)[[1]]
+    common  <- intersect(rownames(w_full), rownames(w_clean))
+    r       <- cor(w_full[common, 1], w_clean[common, 1])
+    cat("Factor", f, "-", v, ": r =", round(r, 3), "\n")
+  }
+}
 
-cat("\n==========================================\n")
-cat("ROBUSTNESS SCORE (Factor 1): ", round(robustness_score, 3), "\n")
-cat("==========================================\n")
-
-saveRDS(model_clean, "~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds")
-
-# 1. EXTRACT FACTOR SCORES (from the Full 10-factor Model)
+# 5. OUTLIER REPORT (from Full Model)
 # ------------------------------------------------------------------------------
-z_df <- get_factors(model_full)$group1
-z_scores <- scale(z_df) # This standardizes everything to Z-scores
+z_df    <- get_factors(model_full)$group1
+z_scores <- scale(z_df)
 
-# 2. IDENTIFY STATISTICAL OUTLIERS (> 3 Standard Deviations)
-# ------------------------------------------------------------------------------
 outlier_indices <- which(abs(z_scores) > 3, arr.ind = TRUE)
-
-outlier_report <- data.frame(
+outlier_report  <- data.frame(
   Sample  = rownames(z_scores)[outlier_indices[, 1]],
   Factor  = colnames(z_scores)[outlier_indices[, 2]],
   Z_Score = round(z_scores[outlier_indices], 3)
 )
 
-# 3. SAVE THE REPORT
-# ------------------------------------------------------------------------------
-output_path <- "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Outlier_Red_Flag_Report.csv"
-write.csv(outlier_report, output_path, row.names = FALSE)
+write.csv(outlier_report,
+          "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Outlier_Red_Flag_Report.csv",
+          row.names = FALSE)
 
-cat("\n--- OUTLIER REPORT GENERATED ---")
+cat("\n--- OUTLIER REPORT ---\n")
 print(outlier_report)
 
-# 1. EXTRACT WEIGHTS FOR FACTOR 1
+# 6. TOP FEATURE DRIVERS — FACTOR 1 (from Full Model)
 # ------------------------------------------------------------------------------
 get_top_features <- function(model, view_name, n = 10) {
   w <- get_weights(model, views = view_name, factors = 1)[[1]]
-  # Sort by absolute weight (importance)
   top_df <- data.frame(
     Feature = rownames(w),
-    Weight  = w[,1]
+    Weight  = w[, 1]
   )
   top_df <- top_df[order(abs(top_df$Weight), decreasing = TRUE), ]
   return(head(top_df, n))
 }
 
-# 2. COMBINE TOP SPECIES & METABOLITES
-# ------------------------------------------------------------------------------
-top_species     <- get_top_features(model_full, "species", 10)
+top_species     <- get_top_features(model_full, "species",     10)
 top_metabolites <- get_top_features(model_full, "metabolites", 10)
 
 final_table <- rbind(
-  cbind(View = "Microbiome", top_species),
+  cbind(View = "Microbiome",  top_species),
   cbind(View = "Metabolites", top_metabolites)
 )
 
-# 3. CLEAN NAMES FOR PUBLICATION
-# ------------------------------------------------------------------------------
 final_table$Feature <- gsub("s__", "", final_table$Feature)
-final_table$Feature <- gsub("\\.", " ", final_table$Feature)
+final_table$Feature <- gsub("\\.",  " ", final_table$Feature)
 
-# 4. SAVE TO DESKTOP
-# ------------------------------------------------------------------------------
-write.csv(final_table, "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Table1_Factor1_Drivers.csv", row.names = FALSE)
+write.csv(final_table,
+          "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Table1_Factor1_Drivers.csv",
+          row.names = FALSE)
 
-cat("\n--- SUCCESS: Table 1 (Top Drivers) saved to Desktop ---\n")
 print(final_table)
+
+# 7. SAVE BEST SENSITIVITY MODEL
+# ------------------------------------------------------------------------------
+saveRDS(best_model_clean,
+        "~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds")
+
+
+
+# 1. Manually load the best sensitivity model from your temporary folder
+# Use the path shown in your 'Saving model' log line
+best_model_clean <- load_model("/var/folders/k2/4rg347055jj2_b20pxbz89100000gn/T//Rtmp6Ann5R/mofa_20260324-162559.hdf5")
+
+cat("\n--- SEARCHING FOR ROBUSTNESS MATCH (Full F1 vs Sensitivity) ---\n")
+
+# Loop through all 3 factors in the clean model to find where F1 went
+for (f_new in 1:3) {
+  cat("\nChecking Sensitivity Factor", f_new, ":\n")
+  for (v in c("species", "metabolites", "pathways")) {
+    w_full  <- get_weights(model_full, views = v, factors = 1)[[1]]
+    w_clean <- get_weights(best_model_clean, views = v, factors = f_new)[[1]]
+    
+    common  <- intersect(rownames(w_full), rownames(w_clean))
+    r <- cor(w_full[common, 1], w_clean[common, 1], method = "spearman")
+    cat("  View:", v, "| rho =", round(r, 3), "\n")
+  }
+}
+
+# Check which factor in the sensitivity model is most driven by SA
+cat("\n--- S. aureus Loading in Sensitivity Model ---\n")
+sa_loadings <- get_weights(best_model_clean, views = "species")[[1]]
+sa_row <- sa_loadings["s__Staphylococcus_aureus", ]
+print(round(sa_row, 3))
+
+# See the top 5 drivers for the factor where SA is highest
+best_sa_factor <- which.max(abs(sa_row))
+cat("\nTop Drivers for Sensitivity Factor", best_sa_factor, ":\n")
+plot_top_weights(best_model_clean, view = "species", factor = best_sa_factor, nfeatures = 5)
+
+
+# --- heatmap of to SA-associated metabolites across samples--------
+
+# 1. PREPARE THE DATA FRAME MANUALLY
+# ------------------------------------------------------------------------------
+# Extract colData safely
+metadata <- as.data.frame(colData(mae_data))
+
+# Double check if eg_id is actually in the metadata
+# If it's missing, we'll use the rownames (Sample IDs) instead
+if(!"eg_id" %in% colnames(metadata)){
+    # Fallback: identify outliers by searching for the ID in the Sample Name
+    is_outlier <- grepl("GYECZ1187|GYECZ1197", rownames(metadata))
+} else {
+    is_outlier <- metadata$eg_id %in% c("GYECZ1187", "GYECZ1197")
+}
+
+# 2. CREATE THE ANNOTATION DATA FRAME
+# ------------------------------------------------------------------------------
+anno_df <- data.frame(
+  Status = ifelse(is_outlier, "Outlier", "Main_Cohort"),
+  row.names = rownames(metadata)
+)
+
+# 3. EXTRACT TOP METABOLITES (FACTOR 1)
+# ------------------------------------------------------------------------------
+w_metab <- get_weights(model_full, views = "metabolites", factors = 1)[[1]]
+top_15_metabs <- rownames(w_metab)[order(abs(w_metab[, 1]), decreasing = TRUE)][1:15]
+
+metab_data <- assay(mae_data[["metabolites"]])[top_15_metabs, ]
+metab_scaled <- t(scale(t(metab_data))) # Z-score
+
+# 4. PLOT
+# ------------------------------------------------------------------------------
+library(pheatmap)
+pheatmap(metab_scaled,
+         main = "Factor 1 Metabolite Drivers (N=17)",
+         annotation_col = anno_df,
+         color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
+         cluster_cols = TRUE, # This will show if outliers group together
+         show_colnames = TRUE,
+         border_color = NA)
 ```
 
 ```{r}
 # 1. LOAD MODELS
-model_full  <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_v4_BEST.rds")
+model_full  <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_10_factors_FINAL.rds")
 model_clean <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds")
+
 
 # 2. CALCULATE ROBUSTNESS (Species View)
 # ------------------------------------------------------------------------------
@@ -2074,7 +2221,7 @@ cat("Species Factor 1 Correlation:     ", round(robustness_species, 3), "\n")
 cat("Metabolites Factor 1 Correlation: ", round(robustness_metab, 3), "\n")
 cat("----------------------------------\n")
 
-if(robustness_species > 0.7) {
+if(robustness_species > 0.7) {s
   cat("RESULT: HIGH ROBUSTNESS. Factor 1 is a valid Cohort Trend.\n")
 } else {
   cat("RESULT: LOW ROBUSTNESS. Factor 1 is driven by individual extremes.\n")
