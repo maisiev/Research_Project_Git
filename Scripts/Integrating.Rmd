@@ -1807,136 +1807,130 @@ MOFA+ finds latent factors between data groups, allowing you to then correlate t
 ### 4.1. Preprocessing & Feature Selection
 
 ```{r}
-# 1. ---- Alignment and Subsetting (FIXED) ----
+# =========================================================
+# 1. Alignment and Subsetting
+# =========================================================
 
-# Ensure species_matched is oriented correctly (Samples as Rows)
-# Your diagnostic showed it was 18x44, which is correct (Samples x Species),
-# but let's make it robust.
+# Ensure samples are rows for species data (Maintains 18x44 structure)
 if (nrow(species_matched) == 44) { 
   species_matched <- t(species_matched) 
 }
 
-# Clean Pathways (Remove empty samples)
+# Remove samples with zero pathway detections to prevent division errors
 pathway_clean <- pathway_matched[rowSums(pathway_matched) > 0, ]
 
-# Find Common Samples across all three
+# Identify samples present in all three data modalities
 common_samples <- Reduce(intersect, list(
   rownames(nmr_matched),
   rownames(species_matched),
   rownames(pathway_clean)
 ))
 
-# Final Subsetting
+# Subset all matrices to the shared 17-18 samples
 nmr_sub     <- nmr_matched[common_samples, ]
 species_sub <- species_matched[common_samples, ]
 pathway_sub <- pathway_clean[common_samples, ]
 
-# 2. ---- Transformation & Feature Selection ----
+# =========================================================
+# 2. Transformation & Feature Selection
+# =========================================================
 
-# --- Microbiome: CLR + Prevalence (Adjusted) ---
-prevalence    <- colMeans(species_sub > 0)          
-# If you want to keep all 44, use prevalence > 0. 
-# If you use 0.20, you will go back to 5 species.
-species_sub   <- species_sub[, prevalence > 0]  
-
-species_final <- as.data.frame(clr(species_sub + 0.5))
+# --- Microbiome: CLR + Prevalence ---
+# Keep species present in at least one sample; apply Centered Log-Ratio
+species_prev  <- colMeans(species_sub > 0)
+species_filtered <- species_sub[, species_prev > 0]
+species_final <- as.data.frame(clr(species_filtered + 0.5)) 
 species_final <- species_final[, apply(species_final, 2, var) > 0]
 
-# --- NMR: PQN + log1p ---
-# Define PQN function manually
+# --- NMR: PQN + Log1p ---
 pqn_normalise <- function(data) {
-  # data should be samples as rows, metabolites as columns
-  # 1. Calculate the reference spectrum (median across samples)
-  reference <- apply(data, 2, median)
-  
-  # 2. Calculate quotients for all metabolites
-  quotients <- t(t(data) / reference)
-  
-  # 3. Find the median quotient for each sample (the dilution factor)
+  reference      <- apply(data, 2, median)
+  quotients      <- t(t(data) / reference)
   sample_medians <- apply(quotients, 1, median, na.rm = TRUE)
-  
-  # 4. Divide original data by the sample medians
-  data_norm <- data / sample_medians
-  return(data_norm)
+  return(data / sample_medians)
 }
 
-# Now run your normalization
-nmr_pqn <- pqn_normalise(nmr_sub)
 nmr_pqn   <- pqn_normalise(nmr_sub)
-nmr_final <- as.data.frame(log1p(nmr_pqn))
+nmr_final <- as.data.frame(log1p(nmr_pqn)) # log(1+x) to normalise intensities
 
-# --- Pathways: TSS + prevalence filter ---
-pathway_norm  <- pathway_sub / rowSums(pathway_sub)
-pathway_prev  <- colMeans(pathway_norm > 0)
-pathway_final <- pathway_norm[, pathway_prev >= 0.30]
-pathway_final <- as.data.frame(log1p(pathway_final * 1e6))
+# --- Pathways ---
+pathway_norm <- pathway_sub / rowSums(pathway_sub)
 
-# 3. ---- Scaling and Verification ----
+# 1. High Prevalence Filter (70%)
+pathway_prev_filter <- colMeans(pathway_norm > 0)
+pathway_filtered    <- pathway_norm[, pathway_prev_filter >= 0.70]
+
+# 2. Log Transform with lower scaling
+# Using 1e4 instead of 1e6 reduces the 'distance' between high and low values
+pathway_log <- log1p(pathway_filtered * 1e4)
+
+# 3. Limit to Top 50 Variable Pathways
+# Reducing the feature count even further forces stability
+pathway_vars <- apply(pathway_log, 2, var)
+top_50_names <- names(sort(pathway_vars, decreasing = TRUE))[1:50]
+pathway_final <- as.data.frame(pathway_log[, top_50_names])
+
+# 4. Use Robust Scaling (Median/MAD instead of Mean/SD)
+# This prevents outliers from blowing up the Z-scores
+robust_scale <- function(x) { (x - median(x)) / (mad(x) + 1e-6) }
+pathway_final_scaled <- apply(pathway_final, 2, robust_scale)
+# =========================================================
+# 3. Scaling and Verification
+# =========================================================
+
+# Z-score all views so they have equal weight in MOFA+
 species_final  <- scale(species_final)
 nmr_final      <- scale(nmr_final)
 pathway_final  <- scale(pathway_final)
 
+# Diagnostic: Ensure all row names (samples) match perfectly
 stopifnot(all(rownames(species_final) == rownames(nmr_final)))
+stopifnot(all(rownames(species_final) == rownames(pathway_final)))
 
-# 4. ---- Create the MAE object ----
-nmr_se     <- SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final))))
-species_se  <- SummarizedExperiment(assays = list(data = t(as.matrix(species_final))))
-pathway_se  <- SummarizedExperiment(assays = list(data = t(as.matrix(pathway_final))))
+# =========================================================
+# 4. Create the MultiAssayExperiment (MAE)
+# =========================================================
 
+# Transpose matrices (MAE expects features as rows)
 mae_data <- MultiAssayExperiment(
   experiments = ExperimentList(
-    metabolites = nmr_se,
-    species     = species_se,
-    pathways    = pathway_se
+    metabolites = SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final)))),
+    species     = SummarizedExperiment(assays = list(data = t(as.matrix(species_final)))),
+    pathways    = SummarizedExperiment(assays = list(data = t(as.matrix(pathway_final))))
   )
 )
 
-# 1. Prepare the metadata: Ensure row names match the sample names in your assays
-# We use the NMR_sample_id as the primary key since your assays use these as colnames
+# Align Metadata
 metadata_for_mae <- master_table %>%
   filter(!is.na(NMR_sample_id)) %>%
   distinct(NMR_sample_id, .keep_all = TRUE) %>%
   column_to_rownames("NMR_sample_id")
 
-# 2. Reorder metadata to match the columns of your experiments
+# Reorder metadata to match MAE columns
 metadata_for_mae <- metadata_for_mae[colnames(mae_data[[1]]), ]
-
-# 3. Assign to the MAE colData slot
 colData(mae_data) <- DataFrame(metadata_for_mae)
 
-# High-level summary
-mae_data
+# =========================================================
+# 5. Final Quality Control Checks
+# =========================================================
 
-# Check dimensions of each experiment inside the MAE
-experiments(mae_data) |> lapply(dim)
+cat("Final MAE Structure:\n")
+print(mae_data)
+cat("\nFeatures per view:\n")
+print(experiments(mae_data) |> lapply(dim))
 
-# Check if all assays have the exact same sample names in the same order
-all(colnames(mae_data[[1]]) == colnames(mae_data[[2]]))
-all(colnames(mae_data[[2]]) == colnames(mae_data[[3]]))
-
-# View the sample map (how MAE connects samples across assays)
-sampleMap(mae_data)
-
-# Pick a random assay (e.g., metabolites)
-test_mat <- assay(mae_data[["metabolites"]])
-
-# After scale(), the mean of each feature (row) should be ~0
-hist(rowMeans(test_mat), main="Distribution of Row Means (Should be ~0)")
-
-# Check for any remaining NAs that might crash downstream models
-any(is.na(test_mat))
-
-# See the first few species names and sample names
-rownames(mae_data[["species"]])[1:5]
-colnames(mae_data[["species"]])[1:5]
-
-# Confirm the number of species is exactly what you expect
-nrow(mae_data[["species"]])
+# Check for remaining NAs that would crash MOFA+
+if(any(is.na(assay(mae_data[[1]]))) | any(is.na(assay(mae_data[[2]]))) | any(is.na(assay(mae_data[[3]])))) {
+  stop("NAs detected in final matrices! Check preprocessing.")
+} else {
+  cat("\nSuccess: No NAs detected. Ready for MOFA+ training.\n")
+}
 ```
 
 ### 4.2. Train MOFA+ Model
 
 ```{r}
+
 # =========================================================
 # 4.2. Main Model Training (N=17)
 # =========================================================
