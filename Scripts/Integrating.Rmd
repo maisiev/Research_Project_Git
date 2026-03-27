@@ -1811,92 +1811,98 @@ MOFA+ finds latent factors between data groups, allowing you to then correlate t
 # 1. Alignment and Subsetting
 # =========================================================
 
-# Ensure samples are rows for species data (Maintains 18x44 structure)
-if (nrow(species_matched) == 44) { 
-  species_matched <- t(species_matched) 
-}
+if (nrow(species_matched) == 44) { species_matched <- t(species_matched) }
 
-# Remove samples with zero pathway detections to prevent division errors
-pathway_clean <- pathway_matched[rowSums(pathway_matched) > 0, ]
-
-# Identify samples present in all three data modalities
 common_samples <- Reduce(intersect, list(
   rownames(nmr_matched),
   rownames(species_matched),
-  rownames(pathway_clean)
+  rownames(pathway_matched)
 ))
 
-# Subset all matrices to the shared 17-18 samples
 nmr_sub     <- nmr_matched[common_samples, ]
 species_sub <- species_matched[common_samples, ]
-pathway_sub <- pathway_clean[common_samples, ]
+pathway_sub <- pathway_matched[common_samples, ]
 
-# =========================================================
-# 2. Transformation & Feature Selection
-# =========================================================
-
-# --- Microbiome: CLR + Prevalence ---
-# Keep species present in at least one sample; apply Centered Log-Ratio
-species_prev  <- colMeans(species_sub > 0)
-species_filtered <- species_sub[, species_prev > 0]
-species_final <- as.data.frame(clr(species_filtered + 0.5)) 
-species_final <- species_final[, apply(species_final, 2, var) > 0]
-
-# --- NMR: PQN + Log1p ---
-pqn_normalise <- function(data) {
-  reference      <- apply(data, 2, median)
-  quotients      <- t(t(data) / reference)
-  sample_medians <- apply(quotients, 1, median, na.rm = TRUE)
-  return(data / sample_medians)
+# --- NEW: PREVALENCE FILTER BLOCK ---
+# We keep features present in at least 5 samples (approx 28% of cohort)
+filter_prevalence <- function(mat, min_samples = 5) {
+  present_in <- colSums(mat != 0 & !is.na(mat))
+  keep <- names(present_in)[present_in >= min_samples]
+  return(mat[, keep, drop = FALSE])
 }
 
-nmr_pqn   <- pqn_normalise(nmr_sub)
-nmr_final <- as.data.frame(log1p(nmr_pqn)) # log(1+x) to normalise intensities
+# Apply filters before any transformations
+species_sub <- filter_prevalence(species_sub, 5)
+nmr_sub     <- filter_prevalence(nmr_sub, 5)
+pathway_sub <- filter_prevalence(pathway_sub, 5)
 
-# --- Pathways ---
+cat("\nFeatures remaining after prevalence filter:\n")
+cat("Species:", ncol(species_sub), "| NMR:", ncol(nmr_sub), "| Pathways:", ncol(pathway_sub), "\n")
+
+# =========================================================
+# 2. Transformation & Global Scaling (NA-Safe Version)
+# =========================================================
+
+# --- 1. Microbiome (Log + Global Scale) ---
+species_log <- log1p(species_sub) 
+sd_sp <- sd(as.matrix(species_log), na.rm = TRUE)
+if(is.na(sd_sp) || sd_sp == 0) sd_sp <- 1 
+species_final_scaled <- (species_log - mean(as.matrix(species_log))) / sd_sp
+
+# --- 2. NMR (PQN + Log + Global Scale) ---
+nmr_pqn <- pqn_normalise(nmr_sub)
+nmr_log <- log1p(nmr_pqn)
+sd_nmr <- sd(as.matrix(nmr_log), na.rm = TRUE)
+if(is.na(sd_nmr) || sd_nmr == 0) sd_nmr <- 1
+nmr_final_scaled <- (nmr_log - mean(as.matrix(nmr_log))) / sd_nmr
+
+# --- 3. Pathways (TSS + Log + Top Variance + Global Scale) ---
+# Ensure no empty rows after filtering
+row_totals <- rowSums(pathway_sub)
+if(any(row_totals == 0)) {
+  pathway_sub <- pathway_sub[row_totals > 0, ]
+  common_final <- rownames(pathway_sub)
+  species_final_scaled <- species_final_scaled[common_final, ]
+  nmr_final_scaled <- nmr_final_scaled[common_final, ]
+}
+
+# Transform
 pathway_norm <- pathway_sub / rowSums(pathway_sub)
+pathway_log  <- log1p(pathway_norm * 1e4)
 
-# 1. High Prevalence Filter (70%)
-pathway_prev_filter <- colMeans(pathway_norm > 0)
-pathway_filtered    <- pathway_norm[, pathway_prev_filter >= 0.70]
+# --- NEW: VARIANCE PRUNING ---
+# We keep only the top 50 pathways to prevent "View Dominance" and NaNs
+pw_vars <- apply(pathway_log, 2, var)
+top_50_names <- names(sort(pw_vars, decreasing = TRUE))[1:min(50, ncol(pathway_log))]
+pathway_log_filtered <- pathway_log[, top_50_names]
 
-# 2. Log Transform with lower scaling
-# Using 1e4 instead of 1e6 reduces the 'distance' between high and low values
-pathway_log <- log1p(pathway_filtered * 1e4)
+# SAFE GLOBAL SCALE
+sd_pw <- sd(as.matrix(pathway_log_filtered), na.rm = TRUE)
+if(is.na(sd_pw) || sd_pw == 0) sd_pw <- 1
+pathway_final_scaled <- (pathway_log_filtered - mean(as.matrix(pathway_log_filtered))) / sd_pw
 
-# 3. Limit to Top 50 Variable Pathways
-# Reducing the feature count even further forces stability
-pathway_vars <- apply(pathway_log, 2, var)
-top_50_names <- names(sort(pathway_vars, decreasing = TRUE))[1:50]
-pathway_final <- as.data.frame(pathway_log[, top_50_names])
-
-# 4. Use Robust Scaling (Median/MAD instead of Mean/SD)
-# This prevents outliers from blowing up the Z-scores
-robust_scale <- function(x) { (x - median(x)) / (mad(x) + 1e-6) }
-pathway_final_scaled <- apply(pathway_final, 2, robust_scale)
+cat("Pathways pruned from", ncol(pathway_log), "down to", ncol(pathway_final_scaled), "\n")
 # =========================================================
-# 3. Scaling and Verification
+# 3. Robust Capping (Preventing the NaN Explosion)
 # =========================================================
 
-# Z-score all views so they have equal weight in MOFA+
-species_final  <- scale(species_final)
-nmr_final      <- scale(nmr_final)
-pathway_final  <- scale(pathway_final)
-
-# Diagnostic: Ensure all row names (samples) match perfectly
-stopifnot(all(rownames(species_final) == rownames(nmr_final)))
-stopifnot(all(rownames(species_final) == rownames(pathway_final)))
+# Cap at 3.0 to keep outliers from dominating
+species_final_scaled[species_final_scaled > 3]  <- 3
+species_final_scaled[species_final_scaled < -3] <- -3
+nmr_final_scaled[nmr_final_scaled > 3]  <- 3
+nmr_final_scaled[nmr_final_scaled < -3] <- -3
+pathway_final_scaled[pathway_final_scaled > 3]  <- 3
+pathway_final_scaled[pathway_final_scaled < -3] <- -3
 
 # =========================================================
-# 4. Create the MultiAssayExperiment (MAE)
+# 4. Create the 3-View MultiAssayExperiment (MAE)
 # =========================================================
 
-# Transpose matrices (MAE expects features as rows)
-mae_data <- MultiAssayExperiment(
+mae_stable <- MultiAssayExperiment(
   experiments = ExperimentList(
-    metabolites = SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final)))),
-    species     = SummarizedExperiment(assays = list(data = t(as.matrix(species_final)))),
-    pathways    = SummarizedExperiment(assays = list(data = t(as.matrix(pathway_final))))
+    metabolites = SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final_scaled)))),
+    species     = SummarizedExperiment(assays = list(data = t(as.matrix(species_final_scaled)))),
+    pathways    = SummarizedExperiment(assays = list(data = t(as.matrix(pathway_final_scaled))))
   )
 )
 
@@ -1906,101 +1912,131 @@ metadata_for_mae <- master_table %>%
   distinct(NMR_sample_id, .keep_all = TRUE) %>%
   column_to_rownames("NMR_sample_id")
 
-# Reorder metadata to match MAE columns
-metadata_for_mae <- metadata_for_mae[colnames(mae_data[[1]]), ]
-colData(mae_data) <- DataFrame(metadata_for_mae)
+metadata_for_mae <- metadata_for_mae[intersect(rownames(metadata_for_mae), colnames(mae_stable[[1]])), ]
+colData(mae_stable) <- DataFrame(metadata_for_mae)
 
 # =========================================================
 # 5. Final Quality Control Checks
 # =========================================================
 
-cat("Final MAE Structure:\n")
-print(mae_data)
-cat("\nFeatures per view:\n")
-print(experiments(mae_data) |> lapply(dim))
+cat("\nFinal MAE Structure (3-View Stable):\n")
+print(mae_stable)
 
-# Check for remaining NAs that would crash MOFA+
-if(any(is.na(assay(mae_data[[1]]))) | any(is.na(assay(mae_data[[2]]))) | any(is.na(assay(mae_data[[3]])))) {
-  stop("NAs detected in final matrices! Check preprocessing.")
+if(any(sapply(experiments(mae_stable), function(x) any(is.na(assay(x)))))) {
+  stop("NAs detected! Check filtering or Log steps.")
 } else {
-  cat("\nSuccess: No NAs detected. Ready for MOFA+ training.\n")
+  cat("\nSuccess: Preprocessing complete. Ready for MOFA+.\n")
 }
 ```
 
 ### 4.2. Train MOFA+ Model
 
 ```{r}
-
 # =========================================================
-# 4.2. Main Model Training (N=17)
+# 4.2. Main Model Training (N=18) - Stable 3-View Version
 # =========================================================
 
-# 1. FINAL DATA SCRUBBING
+# 1. INITIALIZE MOFA OBJECT 
 # ---------------------------------------------------------
-# Remove features with zero variance to prevent NaN errors
-remove_static_features <- function(mae) {
-  for (view in names(experiments(mae))) {
-    dat <- assay(mae[[view]])
-    bad_idx <- which(apply(dat, 1, var) == 0)
-    if(length(bad_idx) > 0) {
-      cat("Removing", length(bad_idx), "static features from", view, "\n")
-      mae <- mae[-bad_idx, , view]
-    }
-  }
-  return(mae)
-}
+# We use 'mae_stable' which now contains Metabolites, Species, and Pathways
+mofa_main <- create_mofa(mae_stable)
 
-mae_main_final <- remove_static_features(mae_data)
-
-# 2. INITIALIZE MOFA OBJECT
-# ---------------------------------------------------------
-mofa_main <- create_mofa(mae_main_final)
-
-# 3. CONFIGURE STABLE OPTIONS
+# 2. CONFIGURE STABLE OPTIONS
 # ---------------------------------------------------------
 data_opts  <- get_default_data_options(mofa_main)
 model_opts <- get_default_model_options(mofa_main)
 train_opts <- get_default_training_options(mofa_main)
 
-# Use 5 factors and 'medium' convergence for N=17 stability
-data_opts$scale_views       <- TRUE
-model_opts$num_factors      <- 5
-train_opts$convergence_mode <- "medium"
-train_opts$seed             <- 42
+# IMPORTANT: scale_views = FALSE
+# We already did manual Global Scaling + Capping to prevent NaNs.
+data_opts$scale_views       <- FALSE 
 
-mofa_main <- prepare_mofa(mofa_main, data_opts, model_opts, train_opts)
+# Stability settings for small N
+model_opts$num_factors      <- 4
+model_opts$spikeslab_weights <- FALSE # Disable slab and spike prior
+model_opts$ard_factors      <- FALSE # Keep factors robust
+model_opts$ard_weights      <- FALSE # Prevent aggressive feature pruning
+train_opts$convergence_mode <- "fast" 
+train_opts$seed             <- 64
+train_opts$maxiter          <- 1000   # Give it more time to settle
 
-# 4. EXECUTE TRAINING
+# 3. DEFINE FILE PATHS
 # ---------------------------------------------------------
-cat("\n--- Training Main Model (N=17) ---\n")
-temp_h5 <- tempfile(fileext = ".hdf5")
-mofa_main@training_options$outfile <- temp_h5
+out_h5  <- "/Users/maisievarcoe/Desktop/Research_Project/Scripts/Integration/MOFA+/mofa_main_temp.hdf5"
+out_rds <- "/Users/maisievarcoe/Desktop/Research_Project/Scripts/Integration/MOFA+/mofa_model_MAIN.rds"
 
-try({
-  # run_mofa will handle the underlying Python/Basilisk call
-  run_mofa(mofa_main, use_basilisk = TRUE)
-  model_main_final <- load_model(temp_h5)
+# Ensure the directory exists
+dir.create(dirname(out_h5), recursive = TRUE, showWarnings = FALSE)
+
+# 4. PREPARE MOFA
+# ---------------------------------------------------------
+mofa_main <- prepare_mofa(
+  object           = mofa_main,
+  data_options     = data_opts,
+  model_options    = model_opts,
+  training_options = train_opts
+)
+
+# Manually assign the outfile to the prepared slot
+mofa_main@training_options$outfile <- out_h5
+
+# 5. EXECUTE TRAINING
+# ---------------------------------------------------------
+cat("\n--- Training Main Model (Metabolites + Species + Pathways) ---\n")
+
+run_mofa(mofa_main, use_basilisk = TRUE)
+
+# 6. LOAD, VERIFY, AND SAVE
+# ---------------------------------------------------------
+if(file.exists(out_h5)) {
+  model_main_final <- load_model(out_h5)
   
-  # Check if training converged mathematically
-  elbo <- as.numeric(tail(model_main_final@training_stats$elbo, 1))
+  # Check mathematical stability
+  elbo_vals <- model_main_final@training_stats$elbo
+  elbo_final <- as.numeric(tail(elbo_vals, 1))
   
-  if(is.finite(elbo)) {
-    saveRDS(model_main_final, "~/Desktop/Research_Project/Scripts/Integration/mofa_model_MAIN.rds")
-    cat("\n--- SUCCESS! Main Model saved to Desktop. ---\n")
+  if(is.finite(elbo_final)) {
+    saveRDS(model_main_final, out_rds)
+    cat("\n--- SUCCESS! 3-View Model saved to project folder ---\n")
+    
+    # Visual check of variance explained per view
+    print(plot_variance_explained(model_main_final))
   } else {
-    cat("\n--- ERROR: Model resulted in NaN. Pathways may be too sparse. ---\n")
+    stop("Model training failed: ELBO resulted in NaN. Data is still too sparse or skewed.")
   }
-})
+} else {
+  stop("HDF5 file was not created. Check folder permissions.")
+}
 
-# 5. QUICK CHECK
+# 7. QUICK BIOLOGICAL CHECK
 # ---------------------------------------------------------
 if(exists("model_main_final")) {
-  print(plot_variance_explained(model_main_final))
-  
-  # Identify if S. aureus is driving Factor 1 or 2
+  # 1. Check S. aureus loadings
   sw <- get_weights(model_main_final, views="species")[[1]]
-  print("S. aureus Loadings:")
-  print(round(sw["s__Staphylococcus_aureus", ], 3))
+  
+  if("s__Staphylococcus_aureus" %in% rownames(sw)) {
+    cat("\nS. aureus Loadings per Factor:\n")
+    print(round(sw["s__Staphylococcus_aureus", ], 3))
+    
+    # Identify the S. aureus factor
+    target_factor <- which.max(abs(sw["s__Staphylococcus_aureus", ]))
+    cat("\nS. aureus is strongest on Factor:", target_factor, "\n")
+    
+    # 2. Check Metabolites on that factor
+    mw <- get_weights(model_main_final, views="metabolites")[[1]]
+    top_metabs <- head(sort(abs(mw[, target_factor]), decreasing = TRUE), 5)
+    cat("\nTop 5 Metabolite Loadings (Factor", target_factor, "):\n")
+    print(top_metabs)
+    
+    # 3. Check Pathways on that factor
+    pw <- get_weights(model_main_final, views="pathways")[[1]]
+    top_paths <- head(sort(abs(pw[, target_factor]), decreasing = TRUE), 5)
+    cat("\nTop 5 Pathway Loadings (Factor", target_factor, "):\n")
+    print(top_paths)
+    
+  } else {
+    cat("\nWarning: S. aureus not found in the species weights.\n")
+  }
 }
 ```
 
