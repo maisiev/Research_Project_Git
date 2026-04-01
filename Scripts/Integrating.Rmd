@@ -2218,10 +2218,14 @@ ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathways_S
 
 Running Spearman's correlations on the whole dataset and then finding overlapping significant features with the linear regressions, to see what is significant in both tests.
 
+This doesn't use the high/low groups like the linear regressions, it works on a continuous scale
+
 ```{r}
-# --- 1. Define the Spearman Function ---
+# --- 1. Define the Spearman Function (Updated) ---
 run_spearman_check <- function(data_matrix, master_df, predictor_col = "sa_abundance") {
   results_list <- list()
+  
+  # Ensure we only use IDs that exist in both datasets
   common_ids <- intersect(rownames(data_matrix), master_df$NMR_sample_id)
   
   for(feature in colnames(data_matrix)) {
@@ -2229,30 +2233,35 @@ run_spearman_check <- function(data_matrix, master_df, predictor_col = "sa_abund
     val_outcome <- as.numeric(as.character(data_matrix[common_ids, feature]))
     val_predictor <- as.numeric(as.character(master_df[[predictor_col]][match(common_ids, master_df$NMR_sample_id)]))
     
-    # Run Spearman test (exact=FALSE handles ties in the data)
-    test <- cor.test(val_outcome, val_predictor, method = "spearman", exact = FALSE)
+    # Create a temporary DF to remove NAs safely
+    df_temp <- na.omit(data.frame(x = val_predictor, y = val_outcome))
     
-    results_list[[feature]] <- data.frame(
-      feature = feature,
-      rho = as.numeric(test$estimate),
-      p_spearman = as.numeric(test$p.value)
-    )
+    # Only run if we have enough data points (Spearman needs at least 3-5)
+    if(nrow(df_temp) > 5) {
+      test <- cor.test(df_temp$x, df_temp$y, method = "spearman", exact = FALSE)
+      
+      results_list[[feature]] <- data.frame(
+        feature = feature,
+        rho = as.numeric(test$estimate),
+        p_spearman = as.numeric(test$p.value)
+      )
+    }
   }
   return(do.call(rbind, results_list))
 }
 
-# --- 2. Run for Metabolites and Compare ---
-spearman_met <- run_spearman_check(nmr_matched, master_table)
+# --- 2. Run and Compare Metabolites ---
+# Note: Use "sa_abundance" here (the raw % values)
+spearman_met <- run_spearman_check(nmr_matched, master_table, predictor_col = "sa_abundance")
 overlap_met <- merge(results_metabolites, spearman_met, by = "feature")
 
-# Identify High-Confidence Metabolites (p < 0.05 in both)
+# High-Confidence: Significant in Linear Regression AND Spearman
 high_conf_met <- overlap_met[overlap_met$p_value < 0.05 & overlap_met$p_spearman < 0.05, ]
 
-# --- 3. Run for Pathways and Compare ---
-spearman_path <- run_spearman_check(pathway_matched, master_table)
+# --- 3. Run and Compare Pathways ---
+spearman_path <- run_spearman_check(pathway_matched, master_table, predictor_col = "sa_abundance")
 overlap_path <- merge(results_pathways, spearman_path, by = "feature")
 
-# Identify High-Confidence Pathways (p < 0.05 in both)
 high_conf_path <- overlap_path[overlap_path$p_value < 0.05 & overlap_path$p_spearman < 0.05, ]
 
 # --- 4. View the High-Confidence List ---
@@ -2264,79 +2273,193 @@ print(head(high_conf_path[order(high_conf_path$p_value), c("feature", "Estimate"
 
 # --- Save High-Confidence Metabolites ---
 write.csv(high_conf_met, 
-          "~/Desktop/Research_Project/Scripts/SA_Regressions/High_Confidence_Metabolites_SA.csv", row.names = FALSE)
+          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Metabolites_SA.csv", row.names = FALSE)
 
 # --- Save High-Confidence Pathways ---
 write.csv(high_conf_path, 
-          "~/Desktop/Research_Project/Scripts/SA_Regressions/High_Confidence_Pathways_SA.csv", row.names = FALSE)
+          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Pathways_SA.csv", row.names = FALSE)
 
 
 # ------- Visualisations----------
 # Reorder features by their Estimate for a cleaner look
 high_conf_met$feature <- reorder(high_conf_met$feature, high_conf_met$Estimate)
 
-metab_hits <- ggplot(high_conf_met, aes(x = feature, y = Estimate, fill = Estimate > 0)) +
-  geom_bar(stat = "identity") +
-  coord_flip() + # Makes it horizontal
-  scale_fill_manual(values = c("firebrick3", "steelblue3"), 
-                    labels = c("Decreased with SA", "Increased with SA"),
-                    name = "Direction") +
-  labs(title = "Metabolites Associated with S. aureus",
-       x = "", y = "Regression Estimate (Effect Size)") +
-  theme_minimal()
-# Display your metabolite plot first, then run:
-ggsave("~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Metabolite_Hits.png", metab_hits, width = 8, height = 6, dpi = 300)
-
-# Sort pathways by Estimate
-high_conf_path$feature <- reorder(high_conf_path$feature, high_conf_path$Estimate)
-
-pathway_hits <- ggplot(high_conf_path, aes(x = feature, y = Estimate, fill = Estimate > 0)) +
-  geom_bar(stat = "identity") +
-  coord_flip() +
-  scale_fill_manual(values = c("firebrick3", "steelblue3"), 
+metab_hits <- ggplot(high_conf_met, aes(x = Estimate, y = reorder(feature, Estimate), fill = Estimate > 0)) +
+  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
+  scale_fill_manual(values = c("#D55E00", "#56B4E9"), 
                     labels = c("Decreased with SA", "Increased with SA"),
                     name = "Direction of Change") +
-  labs(title = "Microbial Pathways Associated with S. aureus Abundance",
-       subtitle = "Adjusted for pH and Lesionality",
-       x = "Pathway", 
-       y = "Regression Estimate (Effect Size)") +
+  labs(title = "Metabolites Associated with S. aureus",
+       subtitle = "High-Confidence Hits (Regression & Spearman p < 0.05)",
+       x = "Regression Estimate (Effect Size)", 
+       y = NULL) +
   theme_minimal() +
-  theme(axis.text.y = element_text(size = 7)) # Adjust size if names overlap
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    axis.text.y = element_text(size = 14, face = "bold"),
+    axis.text.x = element_text(size = 14),
+    legend.position = "bottom",
+    legend.title = element_text(size = 16, face = "bold"),
+    legend.text = element_text(size = 14),
+    legend.key.size = unit(1, "cm"),
+    plot.margin = margin(10, 20, 10, 20)
+  )
 
-# Display your pathway plot first, then run:
-ggsave("~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Pathway_Hits.png", pathway_hits, width = 12, height = 10, dpi = 300)
+ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Metabolite_Hits_Final.png", 
+       width = 10, height = 7, dpi = 300)
+
+
+# 1. Prepare Data: Filter out NAs and clean names
+high_conf_path_plot <- high_conf_path[!is.na(high_conf_path$feature), ]
+high_conf_path_plot$feature_clean <- gsub("\\.", " ", high_conf_path_plot$feature)
+
+# 2. The Plot
+ggplot(high_conf_path_plot, aes(x = Estimate, y = reorder(feature_clean, Estimate), fill = Estimate > 0)) +
+  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 40)) +
+  scale_fill_manual(values = c("#D55E00", "#56B4E9"), 
+                    labels = c("Decreased with SA", "Increased with SA"),
+                    name = "Direction of Change") +
+  labs(title = "Microbial Pathway Shifts Associated with S. aureus",
+       subtitle = "High-Confidence Pathways (Significant in both Regression & Spearman, p<0.05)",
+       x = "Regression Estimate (Effect Size)", 
+       y = NULL) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 20),
+    plot.subtitle = element_text(size = 16, color = "gray30"),
+    axis.text.y = element_text(size = 12, face = "bold", lineheight = 0.8),
+    axis.text.x = element_text(size = 14),
+    axis.title.x = element_text(size = 16),
+    
+    # --- INCREASE KEY (LEGEND) SIZE HERE ---
+    legend.position = "bottom",
+    legend.title = element_text(size = 16, face = "bold"), # Title of the key
+    legend.text = element_text(size = 14),                # Labels in the key
+    legend.key.size = unit(1.2, "cm"),                    # Size of the colored boxes
+    # ---------------------------------------
+    
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(t = 10, r = 50, b = 10, l = 50) 
+  )
+
+# 3. Save with a "landscape" aspect ratio
+ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Hits.png", 
+       width = 15, height = 11, dpi = 300)
 ```
 
-### Figuring out what the unknown metabolites are
+## Step 6: Mediation Analysis
+
+So step 5 shows that certain metabolites/pathways are correlated with S. aureus level. This mediation analysis will see if those metabolites/pathways are actually used by SA to drive skin lesionality.
+
+-   Independent variable = SA level
+
+-   Mediator = metabolites/pathways
+
+-   Outcome = lesional vs non lesional
+
+Will run a loop for each metabolite and pathway to see if any are significant mediators. Using bootstrapped confidence intervals (n=5000 permutations), ending up with an estimate of the indirect effect to build the CI.
+
+Scaled the pathways to handle the tiny abundance numbers. Used logistic regression because lesional is binary.
 
 ```{r}
+# Load the required library
+#if(!require(mediation)) install.packages("mediation")
+library(mediation)
 
-```
+# Fix the metadata in plotting objects
+plot_master$pH_mean <- as.numeric(as.character(plot_master$pH_mean))
+plot_pathways$pH_mean <- as.numeric(as.character(plot_pathways$pH_mean))
 
-```{r}
-# 1. Define which columns are metabolites (Leucine to Unknown 4)
-# You can adjust these numbers if the range is different!
-met_cols <- 2:37 
+# --- 1. Define the Master Mediation Function ---
+# This handles both Metabolites (Standard) and Pathways (Scaled)
+# 1. Create a list to store results
+mediation_summary_list <- list()
 
-# 2. Clean and convert in one go
-#NMR_meta[, met_cols] <- lapply(NMR_meta[, met_cols], function(x) {
-  # Remove literal quotes
- # x <- gsub('"', '', x)
-  # Remove leading/trailing spaces
- # x <- trimws(x)
-  # Convert the cleaned text to a number
- # as.numeric(x)
-#})
-class(NMR_meta)
-str(NMR_meta)
+# 2. Get the list of significant metabolites (from your earlier results)
+# You can use metabolite_hits$feature or high_conf_met$feature
+target_metabolites <- metabolite_hits$feature 
 
-attr(NMR_meta, "ppm") 
-attributes(NMR_meta)
+print(paste("Starting mediation for", length(target_metabolites), "metabolites..."))
 
-colnames(master_table)
-```
+for(met in target_metabolites) {
+  tryCatch({
+    # Run the stable mediation function we defined earlier
+    med_out <- run_sa_mediation_stable(met, plot_master, is_pathway = FALSE)
+    
+    # Extract the key numbers
+    sum_med <- summary(med_out)
+    
+    mediation_summary_list[[met]] <- data.frame(
+      Metabolite = met,
+      ACME_Estimate = med_out$d0,
+      ACME_P_Value = med_out$d0.p,
+      ADE_Estimate = med_out$z0,
+      ADE_P_Value = med_out$z0.p,
+      Prop_Mediated = med_out$n0,
+      Total_Effect = med_out$tau.coef
+    )
+    
+    print(paste("Completed:", met))
+    
+  }, error = function(e) {
+    message(paste("Could not run mediation for", met, ":", e$message))
+  })
+}
 
-```{r}
-head(master_table$sa_abundance)
+# 3. Combine into one table
+mediation_results_table <- do.call(rbind, mediation_summary_list)
 
+# 4. View and Sort by P-value
+mediation_results_table <- mediation_results_table[order(mediation_results_table$ACME_P_Value), ]
+print(mediation_results_table)
+
+# 5. Save the table
+write.csv(mediation_results_table, "~/Desktop/Research_Project/Scripts/Integration/Mediation/Mediation_Results_Metabolites.csv", row.names = FALSE)
+
+# 1. Create a list to store results
+mediation_pathway_list <- list()
+
+# 2. Get the top 5 pathways (already sorted by p-value from your earlier code)
+target_pathways <- head(top_pathways$feature, 5)
+
+print(paste("Starting mediation for", length(target_pathways), "pathways..."))
+
+for(path in target_pathways) {
+  tryCatch({
+    # Run the stable mediation function with is_pathway = TRUE
+    med_out <- run_sa_mediation_stable(path, plot_pathways, is_pathway = TRUE)
+    
+    # Extract the key statistics
+    mediation_pathway_list[[path]] <- data.frame(
+      Pathway = path,
+      ACME_Estimate = med_out$d0,
+      ACME_P_Value = med_out$d0.p,
+      ADE_Estimate = med_out$z0,
+      ADE_P_Value = med_out$z0.p,
+      Prop_Mediated = med_out$n0,
+      Total_Effect = med_out$tau.coef,
+      Samples_Used = med_out$nobs
+    )
+    
+    print(paste("Completed:", path))
+    
+  }, error = function(e) {
+    message(paste("Could not run mediation for", path, ":", e$message))
+  })
+}
+
+# 3. Combine into one table
+mediation_pathway_results <- do.call(rbind, mediation_pathway_list)
+
+# 4. Sort by Mediation P-value (ACME)
+mediation_pathway_results <- mediation_pathway_results[order(mediation_pathway_results$ACME_P_Value), ]
+
+# 5. Print to console to inspect
+print(mediation_pathway_results)
+
+# 6. Save as CSV to your Project Folder
+write.csv(mediation_pathway_results, 
+          "~/Desktop/Research_Project/Scripts/Integration/Mediation/Mediation_Results_Pathways.csv", 
+          row.names = FALSE)
 ```
