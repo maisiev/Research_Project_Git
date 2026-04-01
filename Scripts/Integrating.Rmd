@@ -1,5 +1,5 @@
 ---
-title: "Multi-Omics Integration - Maisie Varcoe"
+title: "Multi-Omics Integration: Maisie Varcoe"
 output: html_document
 date: "2026-03-10"
 ---
@@ -1806,1048 +1806,27 @@ MOFA+ finds latent factors between data groups, allowing you to then correlate t
 
 ### 4.1. Preprocessing & Feature Selection
 
-```{r}
-# =========================================================
-# 1. Alignment and Subsetting (Two-View)
-# =========================================================
-
-if (nrow(species_matched) == 44) { species_matched <- t(species_matched) }
-
-# We only need common samples between the "Big Two"
-common_samples <- intersect(rownames(nmr_matched), rownames(species_matched))
-
-nmr_sub     <- nmr_matched[common_samples, ]
-species_sub <- species_matched[common_samples, ]
-
-# --- MODIFIED FILTERING ---
-# Only remove features that are ZERO in all samples (keeps the rare species)
-species_sub <- species_sub[, colSums(species_sub != 0) > 0]
-nmr_sub     <- nmr_sub[, colSums(nmr_sub != 0) > 0]
-
-cat("\nFeatures for Two-View Run:\n")
-cat("Species:", ncol(species_sub), "| NMR:", ncol(nmr_sub), "\n")
-
-# =========================================================
-# 2. Transformation & Global Scaling
-# =========================================================
-# Define PQN Normalisation Function
-pqn_normalise <- function(data) {
-  # 1. Create a reference sample (median of all samples)
-  reference <- apply(data, 2, median, na.rm = TRUE)
-  
-  # 2. Calculate quotients (sample / reference)
-  # We use t() because R operates on columns by default
-  quotients <- t(t(data) / reference)
-  
-  # 3. Find the median quotient for each sample
-  sample_medians <- apply(quotients, 1, median, na.rm = TRUE)
-  
-  # 4. Divide original data by those medians
-  # If a median is 0 (rare), we replace with 1 to avoid NaN
-  sample_medians[sample_medians == 0] <- 1
-  
-  return(data / sample_medians)
-}
-
-# Microbiome (Unfiltered)
-species_log <- log1p(species_sub)
-sd_sp <- sd(as.matrix(species_log), na.rm = TRUE)
-if(is.na(sd_sp) || sd_sp == 0) sd_sp <- 1
-species_final_scaled <- (species_log - mean(as.matrix(species_log))) / sd_sp
-
-# NMR (Unfiltered)
-nmr_log <- log1p(pqn_normalise(nmr_sub))
-sd_nmr <- sd(as.matrix(nmr_log), na.rm = TRUE)
-if(is.na(sd_nmr) || sd_nmr == 0) sd_nmr <- 1
-nmr_final_scaled <- (nmr_log - mean(as.matrix(nmr_log))) / sd_nmr
-
-# --- Step 3: Robust Capping ---
-species_final_scaled[species_final_scaled > 3]  <- 3
-species_final_scaled[species_final_scaled < -3] <- -3
-nmr_final_scaled[nmr_final_scaled > 3]          <- 3
-nmr_final_scaled[nmr_final_scaled < -3]         <- -3
-
-# =========================================================
-# 4. Create the 2-View MAE
-# =========================================================
-
-mae_two_view <- MultiAssayExperiment(
-  experiments = ExperimentList(
-    metabolites = SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final_scaled)))),
-    species     = SummarizedExperiment(assays = list(data = t(as.matrix(species_final_scaled))))
-  )
-)
-
-# Align Metadata
-metadata_for_mae <- master_table %>%
-  filter(!is.na(NMR_sample_id)) %>%
-  distinct(NMR_sample_id, .keep_all = TRUE) %>%
-  column_to_rownames("NMR_sample_id")
-
-metadata_for_mae <- metadata_for_mae[intersect(rownames(metadata_for_mae), colnames(mae_two_view[[1]])), ]
-colData(mae_two_view) <- DataFrame(metadata_for_mae)
-# =========================================================
-# 5. Final Quality Control Checks
-# =========================================================
-
-cat("\nFinal MAE Structure (3-View Stable):\n")
-print(mae_two_view)
-
-if(any(sapply(experiments(mae_two_view), function(x) any(is.na(assay(x)))))) {
-  stop("NAs detected! Check filtering or Log steps.")
-} else {
-  cat("\nSuccess: Preprocessing complete. Ready for MOFA+.\n")
-}
-```
+`{# {r} # # ========================================================= # # 1. Alignment and Subsetting (Two-View) # # ========================================================= #  # if (nrow(species_matched) == 44) { species_matched <- t(species_matched) } #  # # We only need common samples between the "Big Two" # common_samples <- intersect(rownames(nmr_matched), rownames(species_matched)) #  # nmr_sub     <- nmr_matched[common_samples, ] # species_sub <- species_matched[common_samples, ] #  # # --- MODIFIED FILTERING --- # # Only remove features that are ZERO in all samples (keeps the rare species) # species_sub <- species_sub[, colSums(species_sub != 0) > 0] # nmr_sub     <- nmr_sub[, colSums(nmr_sub != 0) > 0] #  # cat("\nFeatures for Two-View Run:\n") # cat("Species:", ncol(species_sub), "| NMR:", ncol(nmr_sub), "\n") #  # # ========================================================= # # 2. Transformation & Global Scaling # # ========================================================= # # Define PQN Normalisation Function # pqn_normalise <- function(data) { #   # 1. Create a reference sample (median of all samples) #   reference <- apply(data, 2, median, na.rm = TRUE) #    #   # 2. Calculate quotients (sample / reference) #   # We use t() because R operates on columns by default #   quotients <- t(t(data) / reference) #    #   # 3. Find the median quotient for each sample #   sample_medians <- apply(quotients, 1, median, na.rm = TRUE) #    #   # 4. Divide original data by those medians #   # If a median is 0 (rare), we replace with 1 to avoid NaN #   sample_medians[sample_medians == 0] <- 1 #    #   return(data / sample_medians) # } #  # # Microbiome (Unfiltered) # species_log <- log1p(species_sub) # sd_sp <- sd(as.matrix(species_log), na.rm = TRUE) # if(is.na(sd_sp) || sd_sp == 0) sd_sp <- 1 # species_final_scaled <- (species_log - mean(as.matrix(species_log))) / sd_sp #  # # NMR (Unfiltered) # nmr_log <- log1p(pqn_normalise(nmr_sub)) # sd_nmr <- sd(as.matrix(nmr_log), na.rm = TRUE) # if(is.na(sd_nmr) || sd_nmr == 0) sd_nmr <- 1 # nmr_final_scaled <- (nmr_log - mean(as.matrix(nmr_log))) / sd_nmr #  # # --- Step 3: Robust Capping --- # species_final_scaled[species_final_scaled > 3]  <- 3 # species_final_scaled[species_final_scaled < -3] <- -3 # nmr_final_scaled[nmr_final_scaled > 3]          <- 3 # nmr_final_scaled[nmr_final_scaled < -3]         <- -3 #  # # ========================================================= # # 4. Create the 2-View MAE # # ========================================================= #  # mae_two_view <- MultiAssayExperiment( #   experiments = ExperimentList( #     metabolites = SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final_scaled)))), #     species     = SummarizedExperiment(assays = list(data = t(as.matrix(species_final_scaled)))) #   ) # ) #  # # Align Metadata # metadata_for_mae <- master_table %>% #   filter(!is.na(NMR_sample_id)) %>% #   distinct(NMR_sample_id, .keep_all = TRUE) %>% #   column_to_rownames("NMR_sample_id") #  # metadata_for_mae <- metadata_for_mae[intersect(rownames(metadata_for_mae), colnames(mae_two_view[[1]])), ] # colData(mae_two_view) <- DataFrame(metadata_for_mae) # # ========================================================= # # 5. Final Quality Control Checks # # ========================================================= #  # cat("\nFinal MAE Structure (3-View Stable):\n") # print(mae_two_view) #  # if(any(sapply(experiments(mae_two_view), function(x) any(is.na(assay(x)))))) { #   stop("NAs detected! Check filtering or Log steps.") # } else { #   cat("\nSuccess: Preprocessing complete. Ready for MOFA+.\n") # }`
 
 ### 4.2. Train MOFA+ Model
 
-```{r}
-# =========================================================
-# 4.2. Training Block - The "Atomic" Stable Two-View
-# =========================================================
-
-mofa_two <- create_mofa(mae_two_view)
-
-model_opts <- get_default_model_options(mofa_two)
-data_opts  <- get_default_data_options(mofa_two)
-train_opts <- get_default_training_options(mofa_two)
-
-# 1. Manual Scaling Override
-data_opts$scale_views <- FALSE 
-
-# 2. THE NaN KILLERS
-model_opts$num_factors       <- 3      # K=3 is safe for N=17
-model_opts$spikeslab_weights <- FALSE  # CRITICAL: Disable the NaN trigger
-model_opts$ard_weights       <- FALSE  # Disable automatic feature pruning
-model_opts$ard_factors       <- FALSE  # Disable factor pruning
-
-# 3. Execution
-train_opts$convergence_mode <- "fast"
-train_opts$seed <- 64
-
-# Prepare and Run
-out_h5 <- "/Users/maisievarcoe/Desktop/mofa_two_view_unfiltered.hdf5"
-mofa_two <- prepare_mofa(mofa_two, data_options = data_opts, 
-                         model_options = model_opts, training_options = train_opts)
-mofa_two@training_options$outfile <- out_h5
-
-cat("\n--- Running Unfiltered Two-View Model (N=17) ---\n")
-run_mofa(mofa_two, use_basilisk = TRUE)
-
-# =========================================================
-# 6. LOAD, VERIFY, AND SAVE (Two-View Unfiltered)
-# =========================================================
-if(file.exists(out_h5)) {
-  # Load the model from the temporary HDF5 file
-  model_two_final <- load_model(out_h5)
-  
-  # Check mathematical stability (ELBO check)
-  elbo_vals <- model_two_final@training_stats$elbo
-  elbo_final <- as.numeric(tail(elbo_vals, 1))
-  
-  if(is.finite(elbo_final)) {
-    saveRDS(model_two_final, out_rds)
-    cat("\n--- SUCCESS! Two-View Model saved to project folder ---\n")
-    
-    # 1. Visual check of variance explained
-    # This shows if the Species and Metabolites are actually 'talking'
-    print(plot_variance_explained(model_two_final))
-    
-    # 2. Plot the data heatmap to see the factor alignment
-    print(plot_data_heatmap(model_two_final, view = "species", factor = 1, features = 10))
-    
-  } else {
-    stop("Model training failed: ELBO resulted in NaN. Even with Atomic settings, the data is too sparse.")
-  }
-} else {
-  stop("HDF5 file was not created. Check if 'run_mofa' actually executed.")
-}
-
-# =========================================================
-# 7. QUICK BIOLOGICAL CHECK (S. aureus Focus)
-# =========================================================
-if(exists("model_two_final")) {
-  
-  # 1. Extract weights for Species
-  sw <- get_weights(model_two_final, views="species")[[1]]
-  
-  # Search for S. aureus (using the likely MetaPhlAn name)
-  sa_name <- "s__Staphylococcus_aureus"
-  
-  if(sa_name %in% rownames(sw)) {
-    cat("\nS. aureus Loadings across Factors:\n")
-    print(round(sw[sa_name, ], 3))
-    
-    # Identify the factor where S. aureus has the strongest influence
-    target_factor <- which.max(abs(sw[sa_name, ]))
-    cat("\nS. aureus is the primary driver of Factor:", target_factor, "\n")
-    
-    # 2. Identify Metabolites linked to this specific Factor
-    mw <- get_weights(model_two_final, views="metabolites")[[1]]
-    
-    # Get top 10 metabolites for this factor (ranked by absolute weight)
-    top_metabs <- sort(abs(mw[, target_factor]), decreasing = TRUE)
-    top_metabs_names <- names(head(top_metabs, 10))
-    
-    cat("\nTop 10 Metabolites associated with the S. aureus Factor (Factor", target_factor, "):\n")
-    # Show the actual weights (positive or negative) to see directionality
-    print(round(mw[top_metabs_names, target_factor], 3))
-    
-  } else {
-    cat("\nWarning:", sa_name, "not found. Current species available:\n")
-    print(head(rownames(sw), 10))
-  }
-}
-
-
-# Count how many samples have exactly 0 S. aureus
-zero_count <- sum(species_sub[, "s__Staphylococcus_aureus"] == 0)
-cat("Number of samples with zero S. aureus:", zero_count, "out of", nrow(species_sub), "\n")
-
-# List the specific Sample IDs that are zero
-zero_samples <- rownames(species_sub)[species_sub[, "s__Staphylococcus_aureus"] == 0]
-print(zero_samples)
-
-# Plot the raw abundance distribution
-hist(species_sub[, "s__Staphylococcus_aureus"], 
-     breaks = 20, 
-     main = "Distribution of S. aureus Abundance",
-     xlab = "Raw Abundance (MetaPhlAn)", 
-     col = "skyblue")
-
-# Create a quick data frame to compare
-sa_check <- data.frame(
-  SampleID = rownames(species_sub),
-  SA_Abundance = species_sub[, "s__Staphylococcus_aureus"],
-  Status = metadata_for_mae$lesional_status  # Or whatever your column name is
-)
-
-# View the table - look for 0s in the SA_Abundance column
-print(sa_check)
-```
+`{# {r} # # ========================================================= # # 4.2. Training Block - The "Atomic" Stable Two-View # # ========================================================= #  # mofa_two <- create_mofa(mae_two_view) #  # model_opts <- get_default_model_options(mofa_two) # data_opts  <- get_default_data_options(mofa_two) # train_opts <- get_default_training_options(mofa_two) #  # # 1. Manual Scaling Override # data_opts$scale_views <- FALSE  #  # # 2. THE NaN KILLERS # model_opts$num_factors       <- 3      # K=3 is safe for N=17 # model_opts$spikeslab_weights <- FALSE  # CRITICAL: Disable the NaN trigger # model_opts$ard_weights       <- FALSE  # Disable automatic feature pruning # model_opts$ard_factors       <- FALSE  # Disable factor pruning #  # # 3. Execution # train_opts$convergence_mode <- "fast" # train_opts$seed <- 64 #  # # Prepare and Run # out_h5 <- "/Users/maisievarcoe/Desktop/mofa_two_view_unfiltered.hdf5" # mofa_two <- prepare_mofa(mofa_two, data_options = data_opts,  #                          model_options = model_opts, training_options = train_opts) # mofa_two@training_options$outfile <- out_h5 #  # cat("\n--- Running Unfiltered Two-View Model (N=17) ---\n") # run_mofa(mofa_two, use_basilisk = TRUE) #  # # ========================================================= # # 6. LOAD, VERIFY, AND SAVE (Two-View Unfiltered) # # ========================================================= # if(file.exists(out_h5)) { #   # Load the model from the temporary HDF5 file #   model_two_final <- load_model(out_h5) #    #   # Check mathematical stability (ELBO check) #   elbo_vals <- model_two_final@training_stats$elbo #   elbo_final <- as.numeric(tail(elbo_vals, 1)) #    #   if(is.finite(elbo_final)) { #     saveRDS(model_two_final, out_rds) #     cat("\n--- SUCCESS! Two-View Model saved to project folder ---\n") #      #     # 1. Visual check of variance explained #     # This shows if the Species and Metabolites are actually 'talking' #     print(plot_variance_explained(model_two_final)) #      #     # 2. Plot the data heatmap to see the factor alignment #     print(plot_data_heatmap(model_two_final, view = "species", factor = 1, features = 10)) #      #   } else { #     stop("Model training failed: ELBO resulted in NaN. Even with Atomic settings, the data is too sparse.") #   } # } else { #   stop("HDF5 file was not created. Check if 'run_mofa' actually executed.") # } #  # # ========================================================= # # 7. QUICK BIOLOGICAL CHECK (S. aureus Focus) # # ========================================================= # if(exists("model_two_final")) { #    #   # 1. Extract weights for Species #   sw <- get_weights(model_two_final, views="species")[[1]] #    #   # Search for S. aureus (using the likely MetaPhlAn name) #   sa_name <- "s__Staphylococcus_aureus" #    #   if(sa_name %in% rownames(sw)) { #     cat("\nS. aureus Loadings across Factors:\n") #     print(round(sw[sa_name, ], 3)) #      #     # Identify the factor where S. aureus has the strongest influence #     target_factor <- which.max(abs(sw[sa_name, ])) #     cat("\nS. aureus is the primary driver of Factor:", target_factor, "\n") #      #     # 2. Identify Metabolites linked to this specific Factor #     mw <- get_weights(model_two_final, views="metabolites")[[1]] #      #     # Get top 10 metabolites for this factor (ranked by absolute weight) #     top_metabs <- sort(abs(mw[, target_factor]), decreasing = TRUE) #     top_metabs_names <- names(head(top_metabs, 10)) #      #     cat("\nTop 10 Metabolites associated with the S. aureus Factor (Factor", target_factor, "):\n") #     # Show the actual weights (positive or negative) to see directionality #     print(round(mw[top_metabs_names, target_factor], 3)) #      #   } else { #     cat("\nWarning:", sa_name, "not found. Current species available:\n") #     print(head(rownames(sw), 10)) #   } # } #  #  # # Count how many samples have exactly 0 S. aureus # zero_count <- sum(species_sub[, "s__Staphylococcus_aureus"] == 0) # cat("Number of samples with zero S. aureus:", zero_count, "out of", nrow(species_sub), "\n") #  # # List the specific Sample IDs that are zero # zero_samples <- rownames(species_sub)[species_sub[, "s__Staphylococcus_aureus"] == 0] # print(zero_samples) #  # # Plot the raw abundance distribution # hist(species_sub[, "s__Staphylococcus_aureus"],  #      breaks = 20,  #      main = "Distribution of S. aureus Abundance", #      xlab = "Raw Abundance (MetaPhlAn)",  #      col = "skyblue") #  # # Create a quick data frame to compare # sa_check <- data.frame( #   SampleID = rownames(species_sub), #   SA_Abundance = species_sub[, "s__Staphylococcus_aureus"], #   Status = metadata_for_mae$lesional_status  # Or whatever your column name is # ) #  # # View the table - look for 0s in the SA_Abundance column # print(sa_check)`
 
 ### DIABLO
 
-```{r}
-# Install mixOmics if you haven't yet
-#if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager")
-BiocManager::install("mixOmics")
-# =========================================================
-# 6. DIABLO - THE FINAL WORKING VERSION
-# =========================================================
-library(mixOmics)
-
-# 1. Prepare Matrices (Ensure they are matrices for mixOmics)
-X1 <- as.matrix(species_final_scaled)
-X2 <- as.matrix(nmr_final_scaled)
-
-# 2. Extract Grouping Factor (Using the 'lesional' column we found)
-# We use the row names of X1 to ensure we get exactly 18 samples in the right order
-Y_vector <- metadata_for_mae[rownames(X1), "lesional"]
-Y_status <- factor(Y_vector)
-Y_status <- droplevels(Y_status)
-
-# --- QUICK VERIFICATION ---
-cat("Total samples for DIABLO:", length(Y_status), "\n")
-print(table(Y_status)) # Should show 18 samples split between LES and NON_LES
-
-# 3. Run the DIABLO model
-# We define the data list here
-data_list <- list(microbiome = X1, metabolites = X2)
-
-# Run the model
-diablo_res <- block.splsda(X = data_list, 
-                           Y = Y_status, 
-                           ncomp = 2, 
-                           design = "full")
-
-# 4. Visualizations
-# 4a. Sample Plot (The Health vs Disease signature)
-# 1. Open the PNG 'device'
-png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/DIABLO_lesvsnon_clusters.png", 
-    width = 8, height = 6, units = "in", res = 300)
-
-# 2. Run the plot command (it will draw into the file, not the screen)
-plotIndiv(diablo_res, 
-          ind.names = FALSE, 
-          legend = TRUE, 
-          title = "DIABLO: LES vs NON_LES Clusters")
-
-# 3. CRITICAL: Close the device to save the file
-dev.off()
-
-# 4b. Variable Plot (The Correlation Circle)
-# Look for 's__Staphylococcus_aureus' here!
-# 1. Open the file device
-png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/DIABLO_Correlation_Circle.png", 
-    width = 2400, height = 2400, res = 300) # res=300 for high quality
-
-# 2. Run the plot command exactly as you have it
-plotVar(diablo_res, 
-        cutoff = 0.5, 
-        pch = c(16, 17), 
-        legend = TRUE, 
-        title = "DIABLO: Species-Metabolite Correlations")
-
-# 3. Close the device (this actually writes the file)
-dev.off()
-
-# 4c. The Relevance Network (The Spider Web)
-# 1. Open a high-resolution PNG file
-png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/DIABLO_Network_Plot.png", width = 1200, height = 1200, res = 150)
-
-# 2. Run the network command
-# Cutoff 0.6 will show the 'Top Tier' correlations (Max is 0.68)
-network(diablo_res, 
-        blocks = c(1,2), 
-        cutoff = 0.6, 
-        color.node = c("lightcyan", "mistyrose"),
-        show.edge.labels = FALSE) 
-
-# 3. Close file
-dev.off()
-
-
-# 1. Extract the "Variates" (The combined 'Super-Variables' DIABLO created)
-# We focus on Component 1, which explains the most variance
-micro_comp1 <- diablo_res$variates$microbiome[,1]
-metab_comp1 <- diablo_res$variates$metabolites[,1]
-
-# 2. Extract the "Loadings" 
-# (These are the scores for every individual species and metabolite)
-micro_loadings <- diablo_res$loadings$microbiome[,1]
-metab_loadings <- diablo_res$loadings$metabolites[,1]
-
-# 3. Find the strongest Species
-# We sort by absolute value because high negative is just as important as high positive
-top_species <- sort(micro_loadings, decreasing = TRUE)
-cat("--- Top Microbiome Contributors ---\n")
-print(head(top_species, 10))
-
-# 4. Find the strongest Metabolites
-top_metabolites <- sort(metab_loadings, decreasing = TRUE)
-cat("\n--- Top Metabolite Contributors ---\n")
-print(head(top_metabolites, 10))
-
-# 5. Calculate the 'Cross-Correlation' (The Similarity Matrix)
-# This mimics exactly what the network plot draws
-sim_matrix <- cor(diablo_res$X$microbiome, diablo_res$X$metabolites)
-
-# Convert to a list and find the links for S. aureus specifically
-sa_name <- grep("aureus", colnames(diablo_res$X$microbiome), value = TRUE)
-if(length(sa_name) > 0) {
-  sa_correlations <- sort(sim_matrix[sa_name, ], decreasing = TRUE)
-  cat("\n--- Top Metabolites correlated with S. aureus ---\n")
-  print(head(sa_correlations, 10))
-}
-
-png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Metab_Loadings_Comp1.png", width = 1200, height = 1200, res = 150)
-# Plot the top 10 metabolites and how they contribute to separating LES vs NON_LES
-plotLoadings(diablo_res, block = "metabolites", comp = 1, ndisplay = 10, method = 'median')
-dev.off()
-
-png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Microb_Loadings_Comp1.png", width = 1200, height = 1200, res = 150)
-# Plot the top 10 metabolites and how they contribute to separating LES vs NON_LES
-plotLoadings(diablo_res, 
-             block = "microbiome", 
-             comp = 1, 
-             ndisplay = 10, 
-             method = 'median', 
-             title = "Microbiome Loadings on Comp 1")
-dev.off()
-
-# 1. Prepare the data
-# We use sa_name which we found in the previous step
-plot_data <- data.frame(
-  SA_Abundance = species_sub[, sa_name],
-  Glutamic_Acid = nmr_sub[, "Glutamic acid"],
-  Status = metadata_for_mae[rownames(species_sub), "lesional"]
-)
-
-# 2. Run the Linear Model to get stats for the label
-fit <- lm(Glutamic_Acid ~ SA_Abundance, data = plot_data)
-summary_fit <- summary(fit)
-p_val <- summary_fit$coefficients[2,4]
-r_sq  <- summary_fit$r.squared
-
-# 3. Create the ggplot object
-reg_plot <- ggplot(plot_data, aes(x = SA_Abundance, y = Glutamic_Acid)) +
-  geom_smooth(method = "lm", color = "gray", linetype = "dashed", se = TRUE, alpha = 0.1) +
-  geom_point(aes(color = Status), size = 4, alpha = 0.8) +
-  scale_color_manual(values = c("LES" = "firebrick", "NON_LES" = "dodgerblue")) +
-  labs(title = "Statistical Validation: S. aureus vs Glutamic Acid",
-       subtitle = paste0("Linear Regression: R² = ", round(r_sq, 3), 
-                        " | p-value = ", format.pval(p_val, digits = 3)),
-       x = "S. aureus Abundance (Metagenomics)",
-       y = "Glutamic acid (NMR Intensity)",
-       color = "Skin Status") +
-  theme_bw() +
-  theme(plot.title = element_text(face = "bold"))
-
-# 4. Show the plot in RStudio
-print(reg_plot)
-
-# 5. SAVE the plot using ggsave (This works for ggplot objects!)
-ggsave("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Regression_SA_vs_GlutamicAcid.png", 
-       plot = reg_plot, width = 7, height = 5, dpi = 300)
-
-print(summary_fit$coefficients)
-
-# Extract all loadings for the microbiome
-all_microbe_loadings <- diablo_res$loadings$microbiome[,1]
-
-# Find S. aureus specifically
-sa_val <- all_microbe_loadings[grep("aureus", names(all_microbe_loadings))]
-
-# Print the value
-cat("The loading for S. aureus is:", sa_val, "\n")
-
-# Look at the bottom of the list (the negative loadings)
-cat("\nBottom 10 species (Negative Loadings):\n")
-print(sort(all_microbe_loadings)[1:10])
-
-# Define the candidates based on your high-loading bars
-candidates <- c("Alanine", "Leucine", "Glutamic acid")
-
-# Run the validation loop
-for (metab in candidates) {
-  # Sync data
-  df_temp <- data.frame(
-    SA = species_sub[, sa_name],
-    Metabolite = nmr_sub[, metab]
-  )
-  
-  # Run regression
-  fit_temp <- lm(Metabolite ~ SA, data = df_temp)
-  stats <- summary(fit_temp)$coefficients
-  
-  cat("\n--- Testing S. aureus vs", metab, "---\n")
-  cat("P-value:", stats[2,4], "\n")
-  cat("R-squared:", summary(fit_temp)$r.squared, "\n")
-  
-  # If it's a winner, save the plot
-  if(stats[2,4] < 0.10) { # Saving anything even 'trending'
-    p <- ggplot(df_temp, aes(x = SA, y = Metabolite)) +
-      geom_point(color = "darkred", size = 3) +
-      geom_smooth(method = "lm", color = "black") +
-      labs(title = paste("S. aureus vs", metab),
-           subtitle = paste("p =", round(stats[2,4], 4))) +
-      theme_minimal()
-    
-    ggsave(paste0("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Regression_SA_vs_", metab, ".png"), plot = p)
-  }
-}
-
-# 1. Prepare the Data
-plot_data_ala <- data.frame(
-  SA_Abundance = species_sub[, sa_name],
-  Alanine = nmr_sub[, "Alanine"],
-  Status = metadata_for_mae[rownames(species_sub), "lesional"]
-)
-
-# 2. Run the Model (for the subtitle stats)
-fit_ala <- lm(Alanine ~ SA_Abundance, data = plot_data_ala)
-sum_ala <- summary(fit_ala)
-
-# 3. Create the Plot
-ala_plot <- ggplot(plot_data_ala, aes(x = SA_Abundance, y = Alanine)) +
-  # Add the regression line
-  geom_smooth(method = "lm", color = "black", linetype = "dashed", se = TRUE, alpha = 0.1) +
-  # Color points by Status (LES vs NON_LES)
-  geom_point(aes(color = Status), size = 4, alpha = 0.8) +
-  # Professional colors
-  scale_color_manual(values = c("LES" = "firebrick", "NON_LES" = "dodgerblue")) +
-  labs(title = "Validation: S. aureus vs Alanine",
-       subtitle = paste0("R² = ", round(sum_ala$r.squared, 3), 
-                        " | p-value = ", round(sum_ala$coefficients[2,4], 4)),
-       x = "S. aureus Abundance",
-       y = "Alanine Concentration (NMR)",
-       color = "Skin Status") +
-  theme_bw()
-
-# 4. Save it
-ggsave("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Regression_SA_vs_Alanine_Colored.png", 
-       plot = ala_plot, width = 7, height = 5, dpi = 300)
-
-# Display in RStudio
-print(ala_plot)
-
-
-# 1. Force the EASI scores to be numeric
-easi_scores <- as.numeric(as.character(metadata_for_mae[rownames(nmr_sub), "local_EASI_intensity"]))
-
-# 2. Force Alanine to be numeric
-alanine_vals <- as.numeric(nmr_sub[, "Alanine"])
-
-# 3. Run the correlation
-cor_result <- cor.test(alanine_vals, easi_scores, method = "spearman") # Spearman is safer for clinical scores
-
-# 4. Print the result
-print(cor_result)
-```
+`{# {r} # # Install mixOmics if you haven't yet # #if (!require("BiocManager", quietly = TRUE)) install.packages("BiocManager") # BiocManager::install("mixOmics") # # ========================================================= # # 6. DIABLO - THE FINAL WORKING VERSION # # ========================================================= # library(mixOmics) #  # # 1. Prepare Matrices (Ensure they are matrices for mixOmics) # X1 <- as.matrix(species_final_scaled) # X2 <- as.matrix(nmr_final_scaled) #  # # 2. Extract Grouping Factor (Using the 'lesional' column we found) # # We use the row names of X1 to ensure we get exactly 18 samples in the right order # Y_vector <- metadata_for_mae[rownames(X1), "lesional"] # Y_status <- factor(Y_vector) # Y_status <- droplevels(Y_status) #  # # --- QUICK VERIFICATION --- # cat("Total samples for DIABLO:", length(Y_status), "\n") # print(table(Y_status)) # Should show 18 samples split between LES and NON_LES #  # # 3. Run the DIABLO model # # We define the data list here # data_list <- list(microbiome = X1, metabolites = X2) #  # # Run the model # diablo_res <- block.splsda(X = data_list,  #                            Y = Y_status,  #                            ncomp = 2,  #                            design = "full") #  # # 4. Visualizations # # 4a. Sample Plot (The Health vs Disease signature) # # 1. Open the PNG 'device' # png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/DIABLO_lesvsnon_clusters.png",  #     width = 8, height = 6, units = "in", res = 300) #  # # 2. Run the plot command (it will draw into the file, not the screen) # plotIndiv(diablo_res,  #           ind.names = FALSE,  #           legend = TRUE,  #           title = "DIABLO: LES vs NON_LES Clusters") #  # # 3. CRITICAL: Close the device to save the file # dev.off() #  # # 4b. Variable Plot (The Correlation Circle) # # Look for 's__Staphylococcus_aureus' here! # # 1. Open the file device # png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/DIABLO_Correlation_Circle.png",  #     width = 2400, height = 2400, res = 300) # res=300 for high quality #  # # 2. Run the plot command exactly as you have it # plotVar(diablo_res,  #         cutoff = 0.5,  #         pch = c(16, 17),  #         legend = TRUE,  #         title = "DIABLO: Species-Metabolite Correlations") #  # # 3. Close the device (this actually writes the file) # dev.off() #  # # 4c. The Relevance Network (The Spider Web) # # 1. Open a high-resolution PNG file # png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/DIABLO_Network_Plot.png", width = 1200, height = 1200, res = 150) #  # # 2. Run the network command # # Cutoff 0.6 will show the 'Top Tier' correlations (Max is 0.68) # network(diablo_res,  #         blocks = c(1,2),  #         cutoff = 0.6,  #         color.node = c("lightcyan", "mistyrose"), #         show.edge.labels = FALSE)  #  # # 3. Close file # dev.off() #  #  # # 1. Extract the "Variates" (The combined 'Super-Variables' DIABLO created) # # We focus on Component 1, which explains the most variance # micro_comp1 <- diablo_res$variates$microbiome[,1] # metab_comp1 <- diablo_res$variates$metabolites[,1] #  # # 2. Extract the "Loadings"  # # (These are the scores for every individual species and metabolite) # micro_loadings <- diablo_res$loadings$microbiome[,1] # metab_loadings <- diablo_res$loadings$metabolites[,1] #  # # 3. Find the strongest Species # # We sort by absolute value because high negative is just as important as high positive # top_species <- sort(micro_loadings, decreasing = TRUE) # cat("--- Top Microbiome Contributors ---\n") # print(head(top_species, 10)) #  # # 4. Find the strongest Metabolites # top_metabolites <- sort(metab_loadings, decreasing = TRUE) # cat("\n--- Top Metabolite Contributors ---\n") # print(head(top_metabolites, 10)) #  # # 5. Calculate the 'Cross-Correlation' (The Similarity Matrix) # # This mimics exactly what the network plot draws # sim_matrix <- cor(diablo_res$X$microbiome, diablo_res$X$metabolites) #  # # Convert to a list and find the links for S. aureus specifically # sa_name <- grep("aureus", colnames(diablo_res$X$microbiome), value = TRUE) # if(length(sa_name) > 0) { #   sa_correlations <- sort(sim_matrix[sa_name, ], decreasing = TRUE) #   cat("\n--- Top Metabolites correlated with S. aureus ---\n") #   print(head(sa_correlations, 10)) # } #  # png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Metab_Loadings_Comp1.png", width = 1200, height = 1200, res = 150) # # Plot the top 10 metabolites and how they contribute to separating LES vs NON_LES # plotLoadings(diablo_res, block = "metabolites", comp = 1, ndisplay = 10, method = 'median') # dev.off() #  # png("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Microb_Loadings_Comp1.png", width = 1200, height = 1200, res = 150) # # Plot the top 10 metabolites and how they contribute to separating LES vs NON_LES # plotLoadings(diablo_res,  #              block = "microbiome",  #              comp = 1,  #              ndisplay = 10,  #              method = 'median',  #              title = "Microbiome Loadings on Comp 1") # dev.off() #  # # 1. Prepare the data # # We use sa_name which we found in the previous step # plot_data <- data.frame( #   SA_Abundance = species_sub[, sa_name], #   Glutamic_Acid = nmr_sub[, "Glutamic acid"], #   Status = metadata_for_mae[rownames(species_sub), "lesional"] # ) #  # # 2. Run the Linear Model to get stats for the label # fit <- lm(Glutamic_Acid ~ SA_Abundance, data = plot_data) # summary_fit <- summary(fit) # p_val <- summary_fit$coefficients[2,4] # r_sq  <- summary_fit$r.squared #  # # 3. Create the ggplot object # reg_plot <- ggplot(plot_data, aes(x = SA_Abundance, y = Glutamic_Acid)) + #   geom_smooth(method = "lm", color = "gray", linetype = "dashed", se = TRUE, alpha = 0.1) + #   geom_point(aes(color = Status), size = 4, alpha = 0.8) + #   scale_color_manual(values = c("LES" = "firebrick", "NON_LES" = "dodgerblue")) + #   labs(title = "Statistical Validation: S. aureus vs Glutamic Acid", #        subtitle = paste0("Linear Regression: R² = ", round(r_sq, 3),  #                         " | p-value = ", format.pval(p_val, digits = 3)), #        x = "S. aureus Abundance (Metagenomics)", #        y = "Glutamic acid (NMR Intensity)", #        color = "Skin Status") + #   theme_bw() + #   theme(plot.title = element_text(face = "bold")) #  # # 4. Show the plot in RStudio # print(reg_plot) #  # # 5. SAVE the plot using ggsave (This works for ggplot objects!) # ggsave("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Regression_SA_vs_GlutamicAcid.png",  #        plot = reg_plot, width = 7, height = 5, dpi = 300) #  # print(summary_fit$coefficients) #  # # Extract all loadings for the microbiome # all_microbe_loadings <- diablo_res$loadings$microbiome[,1] #  # # Find S. aureus specifically # sa_val <- all_microbe_loadings[grep("aureus", names(all_microbe_loadings))] #  # # Print the value # cat("The loading for S. aureus is:", sa_val, "\n") #  # # Look at the bottom of the list (the negative loadings) # cat("\nBottom 10 species (Negative Loadings):\n") # print(sort(all_microbe_loadings)[1:10]) #  # # Define the candidates based on your high-loading bars # candidates <- c("Alanine", "Leucine", "Glutamic acid") #  # # Run the validation loop # for (metab in candidates) { #   # Sync data #   df_temp <- data.frame( #     SA = species_sub[, sa_name], #     Metabolite = nmr_sub[, metab] #   ) #    #   # Run regression #   fit_temp <- lm(Metabolite ~ SA, data = df_temp) #   stats <- summary(fit_temp)$coefficients #    #   cat("\n--- Testing S. aureus vs", metab, "---\n") #   cat("P-value:", stats[2,4], "\n") #   cat("R-squared:", summary(fit_temp)$r.squared, "\n") #    #   # If it's a winner, save the plot #   if(stats[2,4] < 0.10) { # Saving anything even 'trending' #     p <- ggplot(df_temp, aes(x = SA, y = Metabolite)) + #       geom_point(color = "darkred", size = 3) + #       geom_smooth(method = "lm", color = "black") + #       labs(title = paste("S. aureus vs", metab), #            subtitle = paste("p =", round(stats[2,4], 4))) + #       theme_minimal() #      #     ggsave(paste0("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Regression_SA_vs_", metab, ".png"), plot = p) #   } # } #  # # 1. Prepare the Data # plot_data_ala <- data.frame( #   SA_Abundance = species_sub[, sa_name], #   Alanine = nmr_sub[, "Alanine"], #   Status = metadata_for_mae[rownames(species_sub), "lesional"] # ) #  # # 2. Run the Model (for the subtitle stats) # fit_ala <- lm(Alanine ~ SA_Abundance, data = plot_data_ala) # sum_ala <- summary(fit_ala) #  # # 3. Create the Plot # ala_plot <- ggplot(plot_data_ala, aes(x = SA_Abundance, y = Alanine)) + #   # Add the regression line #   geom_smooth(method = "lm", color = "black", linetype = "dashed", se = TRUE, alpha = 0.1) + #   # Color points by Status (LES vs NON_LES) #   geom_point(aes(color = Status), size = 4, alpha = 0.8) + #   # Professional colors #   scale_color_manual(values = c("LES" = "firebrick", "NON_LES" = "dodgerblue")) + #   labs(title = "Validation: S. aureus vs Alanine", #        subtitle = paste0("R² = ", round(sum_ala$r.squared, 3),  #                         " | p-value = ", round(sum_ala$coefficients[2,4], 4)), #        x = "S. aureus Abundance", #        y = "Alanine Concentration (NMR)", #        color = "Skin Status") + #   theme_bw() #  # # 4. Save it # ggsave("~/Desktop/Research_Project/Scripts/Integration/DIABLO/Regression_SA_vs_Alanine_Colored.png",  #        plot = ala_plot, width = 7, height = 5, dpi = 300) #  # # Display in RStudio # print(ala_plot) #  #  # # 1. Force the EASI scores to be numeric # easi_scores <- as.numeric(as.character(metadata_for_mae[rownames(nmr_sub), "local_EASI_intensity"])) #  # # 2. Force Alanine to be numeric # alanine_vals <- as.numeric(nmr_sub[, "Alanine"]) #  # # 3. Run the correlation # cor_result <- cor.test(alanine_vals, easi_scores, method = "spearman") # Spearman is safer for clinical scores #  # # 4. Print the result # print(cor_result)`
 
 ### Sensitivity & Robustness Checks
 
-```{r}
-# ==============================================================================
-# SENSITIVITY ANALYSIS — MOFA+ WITHOUT OUTLIERS (N=15)
-# ===========
-# 1. PREPARE THE "CLEAN" DATA (N=14)
-# ------------------------------------------------------------------------------
-patients_to_drop <- c("GYECZ1187", "GYECZ1197")
-keep_logic <- !(mae_data$eg_id %in% patients_to_drop)
-mae_clean <- mae_data[, keep_logic, ]
+`{# {r} # # ============================================================================== # # SENSITIVITY ANALYSIS — MOFA+ WITHOUT OUTLIERS (N=15) # # =========== # # 1. PREPARE THE "CLEAN" DATA (N=14) # # ------------------------------------------------------------------------------ # patients_to_drop <- c("GYECZ1187", "GYECZ1197") # keep_logic <- !(mae_data$eg_id %in% patients_to_drop) # mae_clean <- mae_data[, keep_logic, ] #  # # --- CRITICAL: CLEAN DATA BEFORE INITIALISING MOFA --- # # Identify and remove pathways that have ZERO variance in these 14 samples # pw_data <- assay(mae_clean[["pathways"]]) # bad_features <- which(apply(pw_data, 1, var) == 0) #  # if(length(bad_features) > 0) { #   cat("Warning: Found", length(bad_features), "pathways with zero variance. Removing...\n") #   mae_clean <- mae_clean[-bad_features, , "pathways"] # } #  # # 2. INITIALISE BASE OBJECT (Using the now-clean mae_clean) # # ------------------------------------------------------------------------------ # mofa_clean_base <- create_mofa(mae_clean) #  # data_opts_clean  <- get_default_data_options(mofa_clean_base) # model_opts_clean <- get_default_model_options(mofa_clean_base) # train_opts_clean <- get_default_training_options(mofa_clean_base) #  # data_opts_clean$scale_views         <- TRUE # model_opts_clean$num_factors        <- 3  # The absolute minimum for stability # train_opts_clean$convergence_mode   <- "fast" # train_opts_clean$maxiter            <- 500 #  # mofa_clean_base <- prepare_mofa( #   object           = mofa_clean_base, #   data_options     = data_opts_clean, #   model_options    = model_opts_clean, #   training_options = train_opts_clean # ) #  # # 3. STABILITY LOOP  # # ------------------------------------------------------------------------------ # n_inits          <- 3 # best_elbo_clean  <- -Inf # best_model_clean <- NULL #  # for (i in 1:n_inits) { #   cat("\n--- Running Sensitivity Init", i, "of", n_inits, "---\n") #    #   # Ensure Python options are fresh for each run #   tmp_obj <- mofa_clean_base #   tmp_obj@training_options$seed <- 123 + i #    #   try({ #     trained <- run_mofa(tmp_obj, use_basilisk = TRUE) #     current_elbo <- as.numeric(tail(trained@training_stats$elbo, 1)) #      #     if (!is.na(current_elbo) && is.finite(current_elbo) && current_elbo > best_elbo_clean) { #       best_elbo_clean  <- current_elbo #       best_model_clean <- trained #       cat(">>> New Best Sensitivity Model! ELBO:", round(best_elbo_clean, 2), "\n") #     } #   }) # } #  # # 4. ROBUSTNESS CHECK — COMPARE WEIGHTS ACROSS ALL VIEWS & FACTORS 1-2 # # ------------------------------------------------------------------------------ # model_full <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_10_factors_FINAL.rds") #  # cat("ROBUSTNESS SCORES (Full vs Sensitivity)\n") #  # for (f in 1:2) { #   for (v in c("species", "metabolites", "pathways")) { #     w_full  <- get_weights(model_full,        views = v, factors = f)[[1]] #     w_clean <- get_weights(best_model_clean,  views = v, factors = f)[[1]] #     common  <- intersect(rownames(w_full), rownames(w_clean)) #     r       <- cor(w_full[common, 1], w_clean[common, 1]) #     cat("Factor", f, "-", v, ": r =", round(r, 3), "\n") #   } # } #  # # 5. OUTLIER REPORT (from Full Model) # # ------------------------------------------------------------------------------ # z_df    <- get_factors(model_full)$group1 # z_scores <- scale(z_df) #  # outlier_indices <- which(abs(z_scores) > 3, arr.ind = TRUE) # outlier_report  <- data.frame( #   Sample  = rownames(z_scores)[outlier_indices[, 1]], #   Factor  = colnames(z_scores)[outlier_indices[, 2]], #   Z_Score = round(z_scores[outlier_indices], 3) # ) #  # write.csv(outlier_report, #           "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Outlier_Red_Flag_Report.csv", #           row.names = FALSE) #  # cat("\n--- OUTLIER REPORT ---\n") # print(outlier_report) #  # # 6. TOP FEATURE DRIVERS — FACTOR 1 (from Full Model) # # ------------------------------------------------------------------------------ # get_top_features <- function(model, view_name, n = 10) { #   w <- get_weights(model, views = view_name, factors = 1)[[1]] #   top_df <- data.frame( #     Feature = rownames(w), #     Weight  = w[, 1] #   ) #   top_df <- top_df[order(abs(top_df$Weight), decreasing = TRUE), ] #   return(head(top_df, n)) # } #  # top_species     <- get_top_features(model_full, "species",     10) # top_metabolites <- get_top_features(model_full, "metabolites", 10) #  # final_table <- rbind( #   cbind(View = "Microbiome",  top_species), #   cbind(View = "Metabolites", top_metabolites) # ) #  # final_table$Feature <- gsub("s__", "", final_table$Feature) # final_table$Feature <- gsub("\\.",  " ", final_table$Feature) #  # write.csv(final_table, #           "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Table1_Factor1_Drivers.csv", #           row.names = FALSE) #  # print(final_table) #  # # 7. SAVE BEST SENSITIVITY MODEL # # ------------------------------------------------------------------------------ # saveRDS(best_model_clean, #         "~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds") #  #  #  # # 1. Manually load the best sensitivity model from your temporary folder # # Use the path shown in your 'Saving model' log line # best_model_clean <- load_model("/var/folders/k2/4rg347055jj2_b20pxbz89100000gn/T//Rtmp6Ann5R/mofa_20260324-162559.hdf5") #  # cat("\n--- SEARCHING FOR ROBUSTNESS MATCH (Full F1 vs Sensitivity) ---\n") #  # # Loop through all 3 factors in the clean model to find where F1 went # for (f_new in 1:3) { #   cat("\nChecking Sensitivity Factor", f_new, ":\n") #   for (v in c("species", "metabolites", "pathways")) { #     w_full  <- get_weights(model_full, views = v, factors = 1)[[1]] #     w_clean <- get_weights(best_model_clean, views = v, factors = f_new)[[1]] #      #     common  <- intersect(rownames(w_full), rownames(w_clean)) #     r <- cor(w_full[common, 1], w_clean[common, 1], method = "spearman") #     cat("  View:", v, "| rho =", round(r, 3), "\n") #   } # } #  # # Check which factor in the sensitivity model is most driven by SA # cat("\n--- S. aureus Loading in Sensitivity Model ---\n") # sa_loadings <- get_weights(best_model_clean, views = "species")[[1]] # sa_row <- sa_loadings["s__Staphylococcus_aureus", ] # print(round(sa_row, 3)) #  # # See the top 5 drivers for the factor where SA is highest # best_sa_factor <- which.max(abs(sa_row)) # cat("\nTop Drivers for Sensitivity Factor", best_sa_factor, ":\n") # plot_top_weights(best_model_clean, view = "species", factor = best_sa_factor, nfeatures = 5) #  #  # # --- heatmap of to SA-associated metabolites across samples-------- #  # # 1. PREPARE THE DATA FRAME MANUALLY # # ------------------------------------------------------------------------------ # # Extract colData safely # metadata <- as.data.frame(colData(mae_data)) #  # # Double check if eg_id is actually in the metadata # # If it's missing, we'll use the rownames (Sample IDs) instead # if(!"eg_id" %in% colnames(metadata)){ #     # Fallback: identify outliers by searching for the ID in the Sample Name #     is_outlier <- grepl("GYECZ1187|GYECZ1197", rownames(metadata)) # } else { #     is_outlier <- metadata$eg_id %in% c("GYECZ1187", "GYECZ1197") # } #  # # 2. CREATE THE ANNOTATION DATA FRAME # # ------------------------------------------------------------------------------ # anno_df <- data.frame( #   Status = ifelse(is_outlier, "Outlier", "Main_Cohort"), #   row.names = rownames(metadata) # ) #  # # 3. EXTRACT TOP METABOLITES (FACTOR 1) # # ------------------------------------------------------------------------------ # w_metab <- get_weights(model_full, views = "metabolites", factors = 1)[[1]] # top_15_metabs <- rownames(w_metab)[order(abs(w_metab[, 1]), decreasing = TRUE)][1:15] #  # metab_data <- assay(mae_data[["metabolites"]])[top_15_metabs, ] # metab_scaled <- t(scale(t(metab_data))) # Z-score #  # # 4. PLOT # # ------------------------------------------------------------------------------ # library(pheatmap) # pheatmap(metab_scaled, #          main = "Factor 1 Metabolite Drivers (N=17)", #          annotation_col = anno_df, #          color = colorRampPalette(c("navy", "white", "firebrick3"))(50), #          cluster_cols = TRUE, # This will show if outliers group together #          show_colnames = TRUE, #          border_color = NA)`
 
-# --- CRITICAL: CLEAN DATA BEFORE INITIALISING MOFA ---
-# Identify and remove pathways that have ZERO variance in these 14 samples
-pw_data <- assay(mae_clean[["pathways"]])
-bad_features <- which(apply(pw_data, 1, var) == 0)
+`{# {r} # # 1. LOAD MODELS # model_full  <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_10_factors_FINAL.rds") # model_clean <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds") #  #  # # 2. CALCULATE ROBUSTNESS (Species View) # # ------------------------------------------------------------------------------ # w_full  <- get_weights(model_full, views="species", factors=1)[[1]] # w_clean <- get_weights(model_clean, views="species", factors=1)[[1]] # common  <- intersect(rownames(w_full), rownames(w_clean)) #  # robustness_species <- cor(w_full[common, 1], w_clean[common, 1]) #  # # 3. CALCULATE ROBUSTNESS (Metabolites View) # # ------------------------------------------------------------------------------ # w_full_met  <- get_weights(model_full, views="metabolites", factors=1)[[1]] # w_clean_met <- get_weights(model_clean, views="metabolites", factors=1)[[1]] # common_met  <- intersect(rownames(w_full_met), rownames(w_clean_met)) #  # robustness_metab <- cor(w_full_met[common_met, 1], w_clean_met[common_met, 1]) #  # # 4. PRINT SUMMARY REPORT # # ------------------------------------------------------------------------------ # cat("\n--- PIPELINE ROBUSTNESS REPORT ---\n") # cat("Species Factor 1 Correlation:     ", round(robustness_species, 3), "\n") # cat("Metabolites Factor 1 Correlation: ", round(robustness_metab, 3), "\n") # cat("----------------------------------\n") #  # if(robustness_species > 0.7) { #   cat("RESULT: HIGH ROBUSTNESS. Factor 1 is a valid Cohort Trend.\n") # } else { #   cat("RESULT: LOW ROBUSTNESS. Factor 1 is driven by individual extremes.\n") # }`
 
-if(length(bad_features) > 0) {
-  cat("Warning: Found", length(bad_features), "pathways with zero variance. Removing...\n")
-  mae_clean <- mae_clean[-bad_features, , "pathways"]
-}
-
-# 2. INITIALISE BASE OBJECT (Using the now-clean mae_clean)
-# ------------------------------------------------------------------------------
-mofa_clean_base <- create_mofa(mae_clean)
-
-data_opts_clean  <- get_default_data_options(mofa_clean_base)
-model_opts_clean <- get_default_model_options(mofa_clean_base)
-train_opts_clean <- get_default_training_options(mofa_clean_base)
-
-data_opts_clean$scale_views         <- TRUE
-model_opts_clean$num_factors        <- 3  # The absolute minimum for stability
-train_opts_clean$convergence_mode   <- "fast"
-train_opts_clean$maxiter            <- 500
-
-mofa_clean_base <- prepare_mofa(
-  object           = mofa_clean_base,
-  data_options     = data_opts_clean,
-  model_options    = model_opts_clean,
-  training_options = train_opts_clean
-)
-
-# 3. STABILITY LOOP 
-# ------------------------------------------------------------------------------
-n_inits          <- 3
-best_elbo_clean  <- -Inf
-best_model_clean <- NULL
-
-for (i in 1:n_inits) {
-  cat("\n--- Running Sensitivity Init", i, "of", n_inits, "---\n")
-  
-  # Ensure Python options are fresh for each run
-  tmp_obj <- mofa_clean_base
-  tmp_obj@training_options$seed <- 123 + i
-  
-  try({
-    trained <- run_mofa(tmp_obj, use_basilisk = TRUE)
-    current_elbo <- as.numeric(tail(trained@training_stats$elbo, 1))
-    
-    if (!is.na(current_elbo) && is.finite(current_elbo) && current_elbo > best_elbo_clean) {
-      best_elbo_clean  <- current_elbo
-      best_model_clean <- trained
-      cat(">>> New Best Sensitivity Model! ELBO:", round(best_elbo_clean, 2), "\n")
-    }
-  })
-}
-
-# 4. ROBUSTNESS CHECK — COMPARE WEIGHTS ACROSS ALL VIEWS & FACTORS 1-2
-# ------------------------------------------------------------------------------
-model_full <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_10_factors_FINAL.rds")
-
-cat("ROBUSTNESS SCORES (Full vs Sensitivity)\n")
-
-for (f in 1:2) {
-  for (v in c("species", "metabolites", "pathways")) {
-    w_full  <- get_weights(model_full,        views = v, factors = f)[[1]]
-    w_clean <- get_weights(best_model_clean,  views = v, factors = f)[[1]]
-    common  <- intersect(rownames(w_full), rownames(w_clean))
-    r       <- cor(w_full[common, 1], w_clean[common, 1])
-    cat("Factor", f, "-", v, ": r =", round(r, 3), "\n")
-  }
-}
-
-# 5. OUTLIER REPORT (from Full Model)
-# ------------------------------------------------------------------------------
-z_df    <- get_factors(model_full)$group1
-z_scores <- scale(z_df)
-
-outlier_indices <- which(abs(z_scores) > 3, arr.ind = TRUE)
-outlier_report  <- data.frame(
-  Sample  = rownames(z_scores)[outlier_indices[, 1]],
-  Factor  = colnames(z_scores)[outlier_indices[, 2]],
-  Z_Score = round(z_scores[outlier_indices], 3)
-)
-
-write.csv(outlier_report,
-          "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Outlier_Red_Flag_Report.csv",
-          row.names = FALSE)
-
-cat("\n--- OUTLIER REPORT ---\n")
-print(outlier_report)
-
-# 6. TOP FEATURE DRIVERS — FACTOR 1 (from Full Model)
-# ------------------------------------------------------------------------------
-get_top_features <- function(model, view_name, n = 10) {
-  w <- get_weights(model, views = view_name, factors = 1)[[1]]
-  top_df <- data.frame(
-    Feature = rownames(w),
-    Weight  = w[, 1]
-  )
-  top_df <- top_df[order(abs(top_df$Weight), decreasing = TRUE), ]
-  return(head(top_df, n))
-}
-
-top_species     <- get_top_features(model_full, "species",     10)
-top_metabolites <- get_top_features(model_full, "metabolites", 10)
-
-final_table <- rbind(
-  cbind(View = "Microbiome",  top_species),
-  cbind(View = "Metabolites", top_metabolites)
-)
-
-final_table$Feature <- gsub("s__", "", final_table$Feature)
-final_table$Feature <- gsub("\\.",  " ", final_table$Feature)
-
-write.csv(final_table,
-          "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Table1_Factor1_Drivers.csv",
-          row.names = FALSE)
-
-print(final_table)
-
-# 7. SAVE BEST SENSITIVITY MODEL
-# ------------------------------------------------------------------------------
-saveRDS(best_model_clean,
-        "~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds")
-
-
-
-# 1. Manually load the best sensitivity model from your temporary folder
-# Use the path shown in your 'Saving model' log line
-best_model_clean <- load_model("/var/folders/k2/4rg347055jj2_b20pxbz89100000gn/T//Rtmp6Ann5R/mofa_20260324-162559.hdf5")
-
-cat("\n--- SEARCHING FOR ROBUSTNESS MATCH (Full F1 vs Sensitivity) ---\n")
-
-# Loop through all 3 factors in the clean model to find where F1 went
-for (f_new in 1:3) {
-  cat("\nChecking Sensitivity Factor", f_new, ":\n")
-  for (v in c("species", "metabolites", "pathways")) {
-    w_full  <- get_weights(model_full, views = v, factors = 1)[[1]]
-    w_clean <- get_weights(best_model_clean, views = v, factors = f_new)[[1]]
-    
-    common  <- intersect(rownames(w_full), rownames(w_clean))
-    r <- cor(w_full[common, 1], w_clean[common, 1], method = "spearman")
-    cat("  View:", v, "| rho =", round(r, 3), "\n")
-  }
-}
-
-# Check which factor in the sensitivity model is most driven by SA
-cat("\n--- S. aureus Loading in Sensitivity Model ---\n")
-sa_loadings <- get_weights(best_model_clean, views = "species")[[1]]
-sa_row <- sa_loadings["s__Staphylococcus_aureus", ]
-print(round(sa_row, 3))
-
-# See the top 5 drivers for the factor where SA is highest
-best_sa_factor <- which.max(abs(sa_row))
-cat("\nTop Drivers for Sensitivity Factor", best_sa_factor, ":\n")
-plot_top_weights(best_model_clean, view = "species", factor = best_sa_factor, nfeatures = 5)
-
-
-# --- heatmap of to SA-associated metabolites across samples--------
-
-# 1. PREPARE THE DATA FRAME MANUALLY
-# ------------------------------------------------------------------------------
-# Extract colData safely
-metadata <- as.data.frame(colData(mae_data))
-
-# Double check if eg_id is actually in the metadata
-# If it's missing, we'll use the rownames (Sample IDs) instead
-if(!"eg_id" %in% colnames(metadata)){
-    # Fallback: identify outliers by searching for the ID in the Sample Name
-    is_outlier <- grepl("GYECZ1187|GYECZ1197", rownames(metadata))
-} else {
-    is_outlier <- metadata$eg_id %in% c("GYECZ1187", "GYECZ1197")
-}
-
-# 2. CREATE THE ANNOTATION DATA FRAME
-# ------------------------------------------------------------------------------
-anno_df <- data.frame(
-  Status = ifelse(is_outlier, "Outlier", "Main_Cohort"),
-  row.names = rownames(metadata)
-)
-
-# 3. EXTRACT TOP METABOLITES (FACTOR 1)
-# ------------------------------------------------------------------------------
-w_metab <- get_weights(model_full, views = "metabolites", factors = 1)[[1]]
-top_15_metabs <- rownames(w_metab)[order(abs(w_metab[, 1]), decreasing = TRUE)][1:15]
-
-metab_data <- assay(mae_data[["metabolites"]])[top_15_metabs, ]
-metab_scaled <- t(scale(t(metab_data))) # Z-score
-
-# 4. PLOT
-# ------------------------------------------------------------------------------
-library(pheatmap)
-pheatmap(metab_scaled,
-         main = "Factor 1 Metabolite Drivers (N=17)",
-         annotation_col = anno_df,
-         color = colorRampPalette(c("navy", "white", "firebrick3"))(50),
-         cluster_cols = TRUE, # This will show if outliers group together
-         show_colnames = TRUE,
-         border_color = NA)
-```
-
-```{r}
-# 1. LOAD MODELS
-model_full  <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_10_factors_FINAL.rds")
-model_clean <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_SENSITIVITY.rds")
-
-
-# 2. CALCULATE ROBUSTNESS (Species View)
-# ------------------------------------------------------------------------------
-w_full  <- get_weights(model_full, views="species", factors=1)[[1]]
-w_clean <- get_weights(model_clean, views="species", factors=1)[[1]]
-common  <- intersect(rownames(w_full), rownames(w_clean))
-
-robustness_species <- cor(w_full[common, 1], w_clean[common, 1])
-
-# 3. CALCULATE ROBUSTNESS (Metabolites View)
-# ------------------------------------------------------------------------------
-w_full_met  <- get_weights(model_full, views="metabolites", factors=1)[[1]]
-w_clean_met <- get_weights(model_clean, views="metabolites", factors=1)[[1]]
-common_met  <- intersect(rownames(w_full_met), rownames(w_clean_met))
-
-robustness_metab <- cor(w_full_met[common_met, 1], w_clean_met[common_met, 1])
-
-# 4. PRINT SUMMARY REPORT
-# ------------------------------------------------------------------------------
-cat("\n--- PIPELINE ROBUSTNESS REPORT ---\n")
-cat("Species Factor 1 Correlation:     ", round(robustness_species, 3), "\n")
-cat("Metabolites Factor 1 Correlation: ", round(robustness_metab, 3), "\n")
-cat("----------------------------------\n")
-
-if(robustness_species > 0.7) {
-  cat("RESULT: HIGH ROBUSTNESS. Factor 1 is a valid Cohort Trend.\n")
-} else {
-  cat("RESULT: LOW ROBUSTNESS. Factor 1 is driven by individual extremes.\n")
-}
-```
-
-```{r}
-# 1. Select Top Features for each view based on Factor 1 weights
-# ------------------------------------------------------------------------------
-get_top_feats <- function(model, view, factor, n=10) {
-  w <- get_weights(model, views=view, factors=factor)[[1]]
-  abs_w <- sort(abs(w[,1]), decreasing = TRUE)
-  return(names(abs_w)[1:n])
-}
-
-top_sp  <- get_top_feats(model_full, "species", 1, 10)
-top_met <- get_top_feats(model_full, "metabolites", 1, 10)
-top_path <- get_top_feats(model_full, "pathways", 1, 10)
-
-# 2. Extract and Combine Data
-# ------------------------------------------------------------------------------
-# We'll use the scale=TRUE data from the model
-all_data <- list()
-for(v in c("species", "metabolites", "pathways")) {
-  feats <- if(v=="species") top_sp else if(v=="metabolites") top_met else top_path
-  all_data[[v]] <- t(model_full@data[[v]][[1]][feats, ])
-}
-combined_mat <- do.call(cbind, all_data)
-
-# 3. Final Publication Plot
-# ------------------------------------------------------------------------------
-# Sort samples by Factor 1 score to show the 'gradient'
-f1_scores <- get_factors(model_full)$group1[,1]
-combined_mat <- combined_mat[order(f1_scores), ]
-
-png("~/Desktop/Research_Project/Scripts/Integration/MOFA+/FINAL_Integration_Heatmap.png", 
-    width = 1500, height = 900, res = 150)
-
-pheatmap(t(combined_mat), 
-         cluster_cols = FALSE, # Keep them ordered by Factor 1
-         scale = "row",
-         annotation_col = sample_anno, 
-         annotation_colors = anno_colours,
-         gaps_row = c(10, 20), # Visual gaps between Species/Metab/Path
-         main = "Multi-Omic Signature of Factor 1",
-         color = colorRampPalette(c("#2166AC", "white", "#D6604D"))(100))
-
-dev.off()
-
-# 1. GET ACTIVE FACTORS
-# (Remember, MOFA+ may have dropped some inactive factors)
-n_factors_full  <- ncol(get_factors(model_full)$group1)
-n_factors_clean <- ncol(get_factors(model_clean)$group1)
-n_to_check      <- min(n_factors_full, n_factors_clean)
-
-robustness_results <- data.frame(Factor = 1:n_to_check, Species_Cor = NA, Metab_Cor = NA)
-
-# 2. LOOP THROUGH ALL FACTORS
-for (i in 1:n_to_check) {
-  # Species Correlation
-  w_f_sp <- get_weights(model_full, views="species", factors=i)[[1]]
-  w_c_sp <- get_weights(model_clean, views="species", factors=i)[[1]]
-  common_sp <- intersect(rownames(w_f_sp), rownames(w_c_sp))
-  robustness_results$Species_Cor[i] <- cor(w_f_sp[common_sp, 1], w_c_sp[common_sp, 1])
-  
-  # Metabolites Correlation
-  w_f_met <- get_weights(model_full, views="metabolites", factors=i)[[1]]
-  w_c_met <- get_weights(model_clean, views="metabolites", factors=i)[[1]]
-  common_met <- intersect(rownames(w_f_met), rownames(w_c_met))
-  robustness_results$Metab_Cor[i] <- cor(w_f_met[common_met, 1], w_c_met[common_met, 1])
-}
-
-# 3. VIEW THE MAP
-print(robustness_results)
-
-# 4. SAVE FOR SUPPLEMENTARY DATA
-write.csv(robustness_results, "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Full_Robustness_Report.csv", row.names = FALSE)
-```
+`{# {r} # # 1. Select Top Features for each view based on Factor 1 weights # # ------------------------------------------------------------------------------ # get_top_feats <- function(model, view, factor, n=10) { #   w <- get_weights(model, views=view, factors=factor)[[1]] #   abs_w <- sort(abs(w[,1]), decreasing = TRUE) #   return(names(abs_w)[1:n]) # } #  # top_sp  <- get_top_feats(model_full, "species", 1, 10) # top_met <- get_top_feats(model_full, "metabolites", 1, 10) # top_path <- get_top_feats(model_full, "pathways", 1, 10) #  # # 2. Extract and Combine Data # # ------------------------------------------------------------------------------ # # We'll use the scale=TRUE data from the model # all_data <- list() # for(v in c("species", "metabolites", "pathways")) { #   feats <- if(v=="species") top_sp else if(v=="metabolites") top_met else top_path #   all_data[[v]] <- t(model_full@data[[v]][[1]][feats, ]) # } # combined_mat <- do.call(cbind, all_data) #  # # 3. Final Publication Plot # # ------------------------------------------------------------------------------ # # Sort samples by Factor 1 score to show the 'gradient' # f1_scores <- get_factors(model_full)$group1[,1] # combined_mat <- combined_mat[order(f1_scores), ] #  # png("~/Desktop/Research_Project/Scripts/Integration/MOFA+/FINAL_Integration_Heatmap.png",  #     width = 1500, height = 900, res = 150) #  # pheatmap(t(combined_mat),  #          cluster_cols = FALSE, # Keep them ordered by Factor 1 #          scale = "row", #          annotation_col = sample_anno,  #          annotation_colors = anno_colours, #          gaps_row = c(10, 20), # Visual gaps between Species/Metab/Path #          main = "Multi-Omic Signature of Factor 1", #          color = colorRampPalette(c("#2166AC", "white", "#D6604D"))(100)) #  # dev.off() #  # # 1. GET ACTIVE FACTORS # # (Remember, MOFA+ may have dropped some inactive factors) # n_factors_full  <- ncol(get_factors(model_full)$group1) # n_factors_clean <- ncol(get_factors(model_clean)$group1) # n_to_check      <- min(n_factors_full, n_factors_clean) #  # robustness_results <- data.frame(Factor = 1:n_to_check, Species_Cor = NA, Metab_Cor = NA) #  # # 2. LOOP THROUGH ALL FACTORS # for (i in 1:n_to_check) { #   # Species Correlation #   w_f_sp <- get_weights(model_full, views="species", factors=i)[[1]] #   w_c_sp <- get_weights(model_clean, views="species", factors=i)[[1]] #   common_sp <- intersect(rownames(w_f_sp), rownames(w_c_sp)) #   robustness_results$Species_Cor[i] <- cor(w_f_sp[common_sp, 1], w_c_sp[common_sp, 1]) #    #   # Metabolites Correlation #   w_f_met <- get_weights(model_full, views="metabolites", factors=i)[[1]] #   w_c_met <- get_weights(model_clean, views="metabolites", factors=i)[[1]] #   common_met <- intersect(rownames(w_f_met), rownames(w_c_met)) #   robustness_results$Metab_Cor[i] <- cor(w_f_met[common_met, 1], w_c_met[common_met, 1]) # } #  # # 3. VIEW THE MAP # print(robustness_results) #  # # 4. SAVE FOR SUPPLEMENTARY DATA # write.csv(robustness_results, "~/Desktop/Research_Project/Scripts/Integration/MOFA+/Full_Robustness_Report.csv", row.names = FALSE)`
 
 ### Visualisations
 
-```{r}
-# 1. SETUP
-# ------------------------------------------------------------------------------
-mofa_to_plot <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_v4_BEST.rds")
-
-# Ensure the output directory exists
-output_dir <- "~/Desktop/Research_Project/Scripts/Integration/MOFA+/"
-if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
-
-# 2. VARIANCE EXPLAINED
-# ------------------------------------------------------------------------------
-p1 <- plot_variance_explained(mofa_to_plot, x="view", y="factor") + 
-  theme(axis.text.x = element_text(angle = 45, hjust = 1))
-
-p2 <- plot_variance_explained(mofa_to_plot, plot_total = TRUE)
-
-ggsave(paste0(output_dir, "mofa_variance_per_factor_v5.png"), 
-       plot = p1, width = 7, height = 5, dpi = 300, bg="white")
-ggsave(paste0(output_dir, "mofa_variance_total_v5.png"), 
-       plot = p2, width = 6, height = 5, dpi = 300, bg="white")
-
-# 3. FACTOR SCORES HEATMAP
-# ------------------------------------------------------------------------------
-# Extract factors for our single group
-factors <- get_factors(mofa_to_plot)$group1 
-
-# Create sample annotation based on row names
-# PRO TIP: Check head(rownames(factors)) to ensure the 'NONLES' string is there
-sample_anno <- data.frame(
-  Status = ifelse(grepl("NONLES", rownames(factors)), "NONLES", "LES"),
-  row.names = rownames(factors)
-)
-
-anno_colours <- list(Status = c(LES = "#E41A1C", NONLES = "#377EB8"))
-
-png(paste0(output_dir, "mofa_heatmap_v5.png"), 
-    width = 1300, height = 800, res = 120, bg = "white")
-
-pheatmap(factors,
-         annotation_row = sample_anno,
-         annotation_colors = anno_colours,
-         cluster_rows = TRUE,
-         cluster_cols = FALSE,
-         scale = "column", 
-         color = colorRampPalette(c("#2166AC", "white", "#D6604D"))(100),
-         main = "MOFA+ Factor Scores per Sample",
-         fontsize = 12,
-         cellwidth = 50)
-dev.off()
-
-# Plot the top 15 features (microbes or pathways) for Factor 1
-p_weights <- plot_top_weights(mofa_to_plot, 
-                              view = "pathways", 
-                              factor = 1, 
-                              nfeatures = 15)
-ggsave(paste0(output_dir, "mofa_top_pathways_weights_F1.png"), p_weights)
-
-# 1. DEFINE THE FACTORS YOU WANT TO PLOT
-# ------------------------------------------------------------------------------
-# We check how many factors are actually in your model (likely 7 based on your output)
-active_factors <- 1:ncol(get_factors(model_full)$group1)
-
-# 2. THE MULTI-FACTOR LOOP
-# ------------------------------------------------------------------------------
-for (f in active_factors) {
-  
-  cat("\n--- Generating Heatmap for Factor", f, "---")
-  
-  # A. Select top 10 features for THIS factor (f)
-  top_sp   <- names(sort(abs(get_weights(model_full, views="species", factors=f)[[1]][,1]), decreasing=T))[1:10]
-  top_met  <- names(sort(abs(get_weights(model_full, views="metabolites", factors=f)[[1]][,1]), decreasing=T))[1:10]
-  top_path <- names(sort(abs(get_weights(model_full, views="pathways", factors=f)[[1]][,1]), decreasing=T))[1:10]
-  
-  # B. Extract Data
-  list_data <- list(
-    Microbiome  = model_full@data$species[[1]][top_sp, ],
-    Metabolites = model_full@data$metabolites[[1]][top_met, ],
-    Pathways    = model_full@data$pathways[[1]][top_path, ]
-  )
-  combined_mat <- do.call(rbind, list_data)
-  
-  # C. Re-order samples by the current factor (f) scores
-  # This ensures each heatmap shows a smooth transition for THAT factor
-  f_scores <- get_factors(model_full)$group1[, f]
-  combined_mat <- combined_mat[, order(f_scores)]
-  
-  # D. Sync Annotation
-  sample_anno_ordered <- sample_anno[colnames(combined_mat), , drop=FALSE]
-  rownames(combined_mat) <- clean_label(rownames(combined_mat))
-  
-  # E. Save File
-  file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/Heatmap_Factor_", f, ".png")
-  
-  png(file_name, width = 2000, height = 1200, res = 150)
-  
-  pheatmap(combined_mat, 
-           cluster_cols = FALSE, 
-           cluster_rows = TRUE, 
-           scale = "row", 
-           annotation_col = sample_anno_ordered, 
-           annotation_colors = anno_colours,
-           gaps_row = c(10, 20),
-           main = paste("Integrated Multi-Omic Signature: Factor", f),
-           color = colorRampPalette(c("#2166AC", "white", "#B2182B"))(100),
-           fontsize_row = 10,
-           cellwidth = 30)
-  
-  dev.off()
-}
-
-cat("\n--- ALL HEATMAPS SAVED TO DESKTOP ---")
-
-# Simple T-test for each factor against Status
-# 1. Create a clean, dedicated Data Frame from your master_table
-# ------------------------------------------------------------------------------
-# We pull from master_table and ensure it's a data.frame, not a character vector
-meta_to_add <- master_table %>%
-  select(sample = NMR_sample_id, Status = lesional) %>%
-  distinct() %>%
-  as.data.frame() # Force the 'data.frame' class to avoid signature errors
-
-# 2. Filter to match the samples actually in your model
-# ------------------------------------------------------------------------------
-# This handles the sample difference (N=17 or N=15) automatically
-current_samples <- samples_names(model_full)[[1]]
-meta_to_add <- meta_to_add[meta_to_add$sample %in% current_samples, ]
-
-# 3. Assign using the correct MOFA2 function
-# ------------------------------------------------------------------------------
-# Wrapping in as.data.frame resolves the 'signature = character' error
-samples_metadata(model_full) <- as.data.frame(meta_to_add)
-
-# 4. Final Verification
-# ------------------------------------------------------------------------------
-cat("Success! Group counts in model:\n")
-print(table(model_full@samples_metadata$Status))
-
-# 5. Re-run Significance Test for all 10 Factors
-# ------------------------------------------------------------------------------
-f_mat <- get_factors(model_full)$group1
-status_vec <- as.factor(model_full@samples_metadata$Status)
-
-sig_results <- data.frame(
-  Factor = paste0("Factor ", 1:ncol(f_mat)),
-  P_Value = sapply(1:ncol(f_mat), function(i) {
-    # Perform t-test between LES and NONLES for each factor
-    t.test(f_mat[,i] ~ status_vec)$p.value
-  })
-)
-
-sig_results$Significant <- ifelse(sig_results$P_Value < 0.05, "YES", "no")
-print(sig_results)
-
-
-# 1. Align SA abundance from master_table to the model factors
-# ------------------------------------------------------------------------------
-factors_df <- as.data.frame(get_factors(model_full)$group1)
-factors_df$sample <- rownames(factors_df)
-
-# Link SA abundance and EASI from your master_table
-clinical_data <- master_table %>%
-  select(sample = NMR_sample_id, sa_abundance, EASI) %>%
-  distinct()
-
-factors_df <- factors_df %>%
-  left_join(clinical_data, by = "sample")
-
-# 2. Correlate all factors with SA abundance
-# ------------------------------------------------------------------------------
-sa_correlations <- sapply(1:7, function(i) {
-  cor.test(factors_df[[paste0("Factor", i)]], factors_df$sa_abundance, method = "spearman")$p.value
-})
-
-# 3. Correlate all factors with EASI
-# ------------------------------------------------------------------------------
-easi_correlations <- sapply(1:7, function(i) {
-  cor.test(factors_df[[paste0("Factor", i)]], factors_df$EASI, method = "spearman")$p.value
-})
-
-# 4. Final Clinical Significance Report
-# ------------------------------------------------------------------------------
-clinical_sig <- data.frame(
-  Factor = paste0("Factor ", 1:7),
-  P_vs_Status = sig_results$P_Value, # From your previous run
-  P_vs_SA = round(sa_correlations, 5),
-  P_vs_EASI = round(easi_correlations, 5)
-)
-
-print(clinical_sig)
-
-# 1. EXTRACT FACTOR SCORES
-# ------------------------------------------------------------------------------
-f_scores <- as.data.frame(get_factors(model_full)$group1)
-f_scores$sample <- rownames(f_scores)
-
-# 2. CREATE A CLEAN MAPPING TABLE FROM MASTER_TABLE
-# ------------------------------------------------------------------------------
-# We extract only the necessary columns and remove duplicates
-clinical_map <- master_table %>%
-  select(sample = NMR_sample_id, sa_abundance, Status = lesional) %>%
-  distinct() %>%
-  filter(!is.na(sample))
-
-# 3. JOIN AND CLEAN
-# ------------------------------------------------------------------------------
-# We join the clinical data to the factor scores using the sample IDs
-plot_data <- f_scores %>%
-  left_join(clinical_map, by = "sample") %>%
-  mutate(
-    sa_abundance = as.numeric(sa_abundance),
-    Factor2 = as.numeric(Factor2),
-    Status = as.factor(Status)
-  )
-
-# 4. GENERATE THE SCATTER PLOT
-# ------------------------------------------------------------------------------
-library(ggplot2)
-
-p_f2_sa <- ggplot(plot_data, aes(x = sa_abundance, y = Factor2, colour = Status)) +
-  geom_point(size = 4, alpha = 0.8) +
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") +
-  scale_colour_manual(values = c("LES" = "#E41A1C", "NONLES" = "#377EB8")) +
-  labs(
-    title = "MOFA+ Factor 2 vs. S. aureus Abundance",
-    subtitle = "Significant Multi-Omic Driver (p < 0.00001)",
-    x = "S. aureus Abundance (%)",
-    y = "Factor 2 Score",
-    colour = "Status"
-  ) +
-  theme_classic()
-
-# 5. PRINT AND SAVE
-# ------------------------------------------------------------------------------
-print(p_f2_sa)
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F2_vs_SA_Scatter_MANUAL_FIX.png", 
-       plot = p_f2_sa, width = 8, height = 6, dpi = 300, bg = "white")
-```
+`{# {r} # # 1. SETUP # # ------------------------------------------------------------------------------ # mofa_to_plot <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_v4_BEST.rds") #  # # Ensure the output directory exists # output_dir <- "~/Desktop/Research_Project/Scripts/Integration/MOFA+/" # if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE) #  # # 2. VARIANCE EXPLAINED # # ------------------------------------------------------------------------------ # p1 <- plot_variance_explained(mofa_to_plot, x="view", y="factor") +  #   theme(axis.text.x = element_text(angle = 45, hjust = 1)) #  # p2 <- plot_variance_explained(mofa_to_plot, plot_total = TRUE) #  # ggsave(paste0(output_dir, "mofa_variance_per_factor_v5.png"),  #        plot = p1, width = 7, height = 5, dpi = 300, bg="white") # ggsave(paste0(output_dir, "mofa_variance_total_v5.png"),  #        plot = p2, width = 6, height = 5, dpi = 300, bg="white") #  # # 3. FACTOR SCORES HEATMAP # # ------------------------------------------------------------------------------ # # Extract factors for our single group # factors <- get_factors(mofa_to_plot)$group1  #  # # Create sample annotation based on row names # # PRO TIP: Check head(rownames(factors)) to ensure the 'NONLES' string is there # sample_anno <- data.frame( #   Status = ifelse(grepl("NONLES", rownames(factors)), "NONLES", "LES"), #   row.names = rownames(factors) # ) #  # anno_colours <- list(Status = c(LES = "#E41A1C", NONLES = "#377EB8")) #  # png(paste0(output_dir, "mofa_heatmap_v5.png"),  #     width = 1300, height = 800, res = 120, bg = "white") #  # pheatmap(factors, #          annotation_row = sample_anno, #          annotation_colors = anno_colours, #          cluster_rows = TRUE, #          cluster_cols = FALSE, #          scale = "column",  #          color = colorRampPalette(c("#2166AC", "white", "#D6604D"))(100), #          main = "MOFA+ Factor Scores per Sample", #          fontsize = 12, #          cellwidth = 50) # dev.off() #  # # Plot the top 15 features (microbes or pathways) for Factor 1 # p_weights <- plot_top_weights(mofa_to_plot,  #                               view = "pathways",  #                               factor = 1,  #                               nfeatures = 15) # ggsave(paste0(output_dir, "mofa_top_pathways_weights_F1.png"), p_weights) #  # # 1. DEFINE THE FACTORS YOU WANT TO PLOT # # ------------------------------------------------------------------------------ # # We check how many factors are actually in your model (likely 7 based on your output) # active_factors <- 1:ncol(get_factors(model_full)$group1) #  # # 2. THE MULTI-FACTOR LOOP # # ------------------------------------------------------------------------------ # for (f in active_factors) { #    #   cat("\n--- Generating Heatmap for Factor", f, "---") #    #   # A. Select top 10 features for THIS factor (f) #   top_sp   <- names(sort(abs(get_weights(model_full, views="species", factors=f)[[1]][,1]), decreasing=T))[1:10] #   top_met  <- names(sort(abs(get_weights(model_full, views="metabolites", factors=f)[[1]][,1]), decreasing=T))[1:10] #   top_path <- names(sort(abs(get_weights(model_full, views="pathways", factors=f)[[1]][,1]), decreasing=T))[1:10] #    #   # B. Extract Data #   list_data <- list( #     Microbiome  = model_full@data$species[[1]][top_sp, ], #     Metabolites = model_full@data$metabolites[[1]][top_met, ], #     Pathways    = model_full@data$pathways[[1]][top_path, ] #   ) #   combined_mat <- do.call(rbind, list_data) #    #   # C. Re-order samples by the current factor (f) scores #   # This ensures each heatmap shows a smooth transition for THAT factor #   f_scores <- get_factors(model_full)$group1[, f] #   combined_mat <- combined_mat[, order(f_scores)] #    #   # D. Sync Annotation #   sample_anno_ordered <- sample_anno[colnames(combined_mat), , drop=FALSE] #   rownames(combined_mat) <- clean_label(rownames(combined_mat)) #    #   # E. Save File #   file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/Heatmap_Factor_", f, ".png") #    #   png(file_name, width = 2000, height = 1200, res = 150) #    #   pheatmap(combined_mat,  #            cluster_cols = FALSE,  #            cluster_rows = TRUE,  #            scale = "row",  #            annotation_col = sample_anno_ordered,  #            annotation_colors = anno_colours, #            gaps_row = c(10, 20), #            main = paste("Integrated Multi-Omic Signature: Factor", f), #            color = colorRampPalette(c("#2166AC", "white", "#B2182B"))(100), #            fontsize_row = 10, #            cellwidth = 30) #    #   dev.off() # } #  # cat("\n--- ALL HEATMAPS SAVED TO DESKTOP ---") #  # # Simple T-test for each factor against Status # # 1. Create a clean, dedicated Data Frame from your master_table # # ------------------------------------------------------------------------------ # # We pull from master_table and ensure it's a data.frame, not a character vector # meta_to_add <- master_table %>% #   select(sample = NMR_sample_id, Status = lesional) %>% #   distinct() %>% #   as.data.frame() # Force the 'data.frame' class to avoid signature errors #  # # 2. Filter to match the samples actually in your model # # ------------------------------------------------------------------------------ # # This handles the sample difference (N=17 or N=15) automatically # current_samples <- samples_names(model_full)[[1]] # meta_to_add <- meta_to_add[meta_to_add$sample %in% current_samples, ] #  # # 3. Assign using the correct MOFA2 function # # ------------------------------------------------------------------------------ # # Wrapping in as.data.frame resolves the 'signature = character' error # samples_metadata(model_full) <- as.data.frame(meta_to_add) #  # # 4. Final Verification # # ------------------------------------------------------------------------------ # cat("Success! Group counts in model:\n") # print(table(model_full@samples_metadata$Status)) #  # # 5. Re-run Significance Test for all 10 Factors # # ------------------------------------------------------------------------------ # f_mat <- get_factors(model_full)$group1 # status_vec <- as.factor(model_full@samples_metadata$Status) #  # sig_results <- data.frame( #   Factor = paste0("Factor ", 1:ncol(f_mat)), #   P_Value = sapply(1:ncol(f_mat), function(i) { #     # Perform t-test between LES and NONLES for each factor #     t.test(f_mat[,i] ~ status_vec)$p.value #   }) # ) #  # sig_results$Significant <- ifelse(sig_results$P_Value < 0.05, "YES", "no") # print(sig_results) #  #  # # 1. Align SA abundance from master_table to the model factors # # ------------------------------------------------------------------------------ # factors_df <- as.data.frame(get_factors(model_full)$group1) # factors_df$sample <- rownames(factors_df) #  # # Link SA abundance and EASI from your master_table # clinical_data <- master_table %>% #   select(sample = NMR_sample_id, sa_abundance, EASI) %>% #   distinct() #  # factors_df <- factors_df %>% #   left_join(clinical_data, by = "sample") #  # # 2. Correlate all factors with SA abundance # # ------------------------------------------------------------------------------ # sa_correlations <- sapply(1:7, function(i) { #   cor.test(factors_df[[paste0("Factor", i)]], factors_df$sa_abundance, method = "spearman")$p.value # }) #  # # 3. Correlate all factors with EASI # # ------------------------------------------------------------------------------ # easi_correlations <- sapply(1:7, function(i) { #   cor.test(factors_df[[paste0("Factor", i)]], factors_df$EASI, method = "spearman")$p.value # }) #  # # 4. Final Clinical Significance Report # # ------------------------------------------------------------------------------ # clinical_sig <- data.frame( #   Factor = paste0("Factor ", 1:7), #   P_vs_Status = sig_results$P_Value, # From your previous run #   P_vs_SA = round(sa_correlations, 5), #   P_vs_EASI = round(easi_correlations, 5) # ) #  # print(clinical_sig) #  # # 1. EXTRACT FACTOR SCORES # # ------------------------------------------------------------------------------ # f_scores <- as.data.frame(get_factors(model_full)$group1) # f_scores$sample <- rownames(f_scores) #  # # 2. CREATE A CLEAN MAPPING TABLE FROM MASTER_TABLE # # ------------------------------------------------------------------------------ # # We extract only the necessary columns and remove duplicates # clinical_map <- master_table %>% #   select(sample = NMR_sample_id, sa_abundance, Status = lesional) %>% #   distinct() %>% #   filter(!is.na(sample)) #  # # 3. JOIN AND CLEAN # # ------------------------------------------------------------------------------ # # We join the clinical data to the factor scores using the sample IDs # plot_data <- f_scores %>% #   left_join(clinical_map, by = "sample") %>% #   mutate( #     sa_abundance = as.numeric(sa_abundance), #     Factor2 = as.numeric(Factor2), #     Status = as.factor(Status) #   ) #  # # 4. GENERATE THE SCATTER PLOT # # ------------------------------------------------------------------------------ # library(ggplot2) #  # p_f2_sa <- ggplot(plot_data, aes(x = sa_abundance, y = Factor2, colour = Status)) + #   geom_point(size = 4, alpha = 0.8) + #   geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") + #   scale_colour_manual(values = c("LES" = "#E41A1C", "NONLES" = "#377EB8")) + #   labs( #     title = "MOFA+ Factor 2 vs. S. aureus Abundance", #     subtitle = "Significant Multi-Omic Driver (p < 0.00001)", #     x = "S. aureus Abundance (%)", #     y = "Factor 2 Score", #     colour = "Status" #   ) + #   theme_classic() #  # # 5. PRINT AND SAVE # # ------------------------------------------------------------------------------ # print(p_f2_sa) #  # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F2_vs_SA_Scatter_MANUAL_FIX.png",  #        plot = p_f2_sa, width = 8, height = 6, dpi = 300, bg = "white")`
 
 ### 4.3. Correlate Factor Scores with S. Aureus Abundance
 
@@ -2858,262 +1837,94 @@ Correlate MOFA+ factor scores with SA abundance to identify which factor tracks 
 So the Spearman correlation are between each factor's score with SA and EASI (lesionality). For each factor (1-4), across all 18 samples, asking if that samples score on that factor track with how much SA that sample has.
 
 ```{r}
-# Add SA abundance to factors dataframe
-factors_df <- as.data.frame(factors)
-factors_df$sa_abundance <- master_table$sa_abundance[
-  match(rownames(factors_df), master_table$NMR_sample_id)
-]
-factors_df$EASI <- master_table$EASI[
-  match(rownames(factors_df), master_table$NMR_sample_id)
-]
-factors_df$lesional <- master_table$lesional[
-  match(rownames(factors_df), master_table$NMR_sample_id)
-]
-
-# -------- F1&2 Correlations with SA & EASI -------------
-# Spearman correlations with SA - Factors 1 and 2 only
-sa_cors <- cor(factors_df[, 1:2], 
-               factors_df$sa_abundance,
-               method = "spearman",
-               use = "complete.obs")
-
-print(sa_cors)
-# Spearman correlations with EASI - Factors 1 and 2 only
-easi_cors <- cor(factors_df[, 1:2],
-                 factors_df$EASI,
-                 method = "spearman",
-                 use = "complete.obs")
-
-print(easi_cors)
-# Run cor.test for each factor against SA and EASI
-# p values for Factors 1 and 2 only
-for(f in paste0("Factor", 1:2)) {
-  cat("\n---", f, "---\n")
-  
-  sa_test <- cor.test(factors_df[[f]], 
-                      factors_df$sa_abundance,
-                      method = "spearman", exact=FALSE)
-  cat("SA:   rho =", round(sa_test$estimate, 3),
-      "  p =", round(sa_test$p.value, 3), "\n")
-  
-  easi_test <- cor.test(factors_df[[f]], 
-                        factors_df$EASI,
-                        method = "spearman", exact=FALSE)
-  cat("EASI: rho =", round(easi_test$estimate, 3),
-      "  p =", round(easi_test$p.value, 3), "\n")
-}
-
-#------- F1&2 Correlations with all Clincal Variables-------
-# Select numeric clinical variables
-clinical_vars <- master_table %>%
-  select(sa_abundance, EASI, age, TEWL_mean, pH_mean,
-         weeks_since_last_TCS_or_TCI) %>%
-  mutate(
-    TEWL_mean = as.numeric(gsub("none|not_done", NA, TEWL_mean)),
-    pH_mean = as.numeric(gsub("none|not_done", NA, pH_mean)),
-    EASI = as.numeric(EASI),
-    age = as.numeric(age)
-  )
-# Match to factor scores by NMR sample ID
-clinical_vars <- clinical_vars[
-  match(rownames(factors_df), master_table$NMR_sample_id), 
-]
-
-# Correlate all clinical variables against Factors 1 and 2
-for(f in paste0("Factor", 1:2)) {
-  cat("\n======", f, "======\n")
-  for(v in colnames(clinical_vars)) {
-    test <- cor.test(factors_df[[f]], clinical_vars[[v]],
-                     method = "spearman", exact = FALSE)
-    cat(v, ": rho =", round(test$estimate, 3),
-        "  p =", round(test$p.value, 3), "\n")
-  }
-}
-
-# Add lesional status to factors_df and plot Factor 1 by lesional status
-F1_lesional <- ggplot(factors_df, aes(x = lesional, y = Factor1, fill = lesional)) +
-  geom_boxplot() +
-  geom_jitter(width = 0.1) +
-  labs(title = "Factor 1 scores by lesional status") +
-  theme_classic()
-
-# Test it statistically
-wilcox.test(Factor1 ~ lesional, data = factors_df)
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_Lesionality3.png",
-       plot = F1_lesional,
-       width = 8, height = 5, dpi = 300) 
-
-# test all factors correlation with lesionality
-for(f in paste0("Factor", 1:4)) {
-  test <- wilcox.test(factors_df[[f]] ~ factors_df$lesional)
-  cat(f, ": p =", round(test$p.value, 3), "\n")
-}
-
-
+# Add SA abundance to factors dataframe # factors_df <- as.data.frame(factors) # factors_df$sa_abundance <- master_table$sa_abundance[ # match(rownames(factors_df), master_table$NMR_sample_id)
+# ]
+# factors_df$EASI <- master_table$EASI[
+#   match(rownames(factors_df), master_table$NMR_sample_id) # ] # factors_df$lesional <- master_table$lesional[ # match(rownames(factors_df), master_table$NMR_sample_id)
+# ]
+#
+# # -------- F1&2 Correlations with SA & EASI -------------
+# # Spearman correlations with SA - Factors 1 and 2 only
+# sa_cors <- cor(factors_df[, 1:2],
+#                factors_df$sa_abundance, # method = "spearman", # use = "complete.obs") # # print(sa_cors) # # Spearman correlations with EASI - Factors 1 and 2 only # easi_cors <- cor(factors_df[, 1:2], # factors_df$EASI,
+#                  method = "spearman",
+#                  use = "complete.obs")
+#
+# print(easi_cors)
+# # Run cor.test for each factor against SA and EASI
+# # p values for Factors 1 and 2 only
+# for(f in paste0("Factor", 1:2)) {
+#   cat("\n---", f, "---\n")
+#
+#   sa_test <- cor.test(factors_df[[f]],
+#                       factors_df$sa_abundance, # method = "spearman", exact=FALSE) # cat("SA: rho =", round(sa_test$estimate, 3),
+#       "  p =", round(sa_test$p.value, 3), "\n") ## easi_test <- cor.test(factors_df[[f]], # factors_df$EASI,
+#                         method = "spearman", exact=FALSE)
+#   cat("EASI: rho =", round(easi_test$estimate, 3), # " p =", round(easi_test$p.value, 3), "\n")
+# }
+#
+# #------- F1&2 Correlations with all Clincal Variables-------
+# # Select numeric clinical variables
+# clinical_vars <- master_table %>%
+#   select(sa_abundance, EASI, age, TEWL_mean, pH_mean,
+#          weeks_since_last_TCS_or_TCI) %>%
+#   mutate(
+#     TEWL_mean = as.numeric(gsub("none|not_done", NA, TEWL_mean)),
+#     pH_mean = as.numeric(gsub("none|not_done", NA, pH_mean)),
+#     EASI = as.numeric(EASI),
+#     age = as.numeric(age)
+#   )
+# # Match to factor scores by NMR sample ID
+# clinical_vars <- clinical_vars[
+#   match(rownames(factors_df), master_table$NMR_sample_id), # ] # # # Correlate all clinical variables against Factors 1 and 2 # for(f in paste0("Factor", 1:2)) { # cat("\n======", f, "======\n") # for(v in colnames(clinical_vars)) { # test <- cor.test(factors_df[[f]], clinical_vars[[v]], # method = "spearman", exact = FALSE) # cat(v, ": rho =", round(test$estimate, 3),
+#         "  p =", round(test$p.value, 3), "\n") # } # } # # # Add lesional status to factors_df and plot Factor 1 by lesional status # F1_lesional <- ggplot(factors_df, aes(x = lesional, y = Factor1, fill = lesional)) + # geom_boxplot() + # geom_jitter(width = 0.1) + # labs(title = "Factor 1 scores by lesional status") + # theme_classic() # # # Test it statistically # wilcox.test(Factor1 ~ lesional, data = factors_df) # # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_Lesionality3.png", # plot = F1_lesional, # width = 8, height = 5, dpi = 300) # # # test all factors correlation with lesionality # for(f in paste0("Factor", 1:4)) { # test <- wilcox.test(factors_df[[f]] ~ factors_df$lesional)
+#   cat(f, ": p =", round(test$p.value, 3), "\n") # } #
 ```
+
+```         
 
 Exploring the factors
 
-```{r}
-plot_variance_explained(mofa_obj, max_r2 =10)
-
-
-# --- Top Weights ----------
-# Plots top n features with the highest absolute loading value
-# for a specific factor
-# Good for identifying the main drivers of a factor
-# high absolute loading value >0.8
-
-target_factors <- 1:4
-target_views <- c("species", "metabolites")
-
-for (f in target_factors) {
-  for (v in target_views) {
-    
-    # 1. Create the Top Weights plot
-    p <- plot_top_weights(mofa_obj, 
-                          view = v, 
-                          factor = f, 
-                          nfeatures = 10, 
-                          scale = TRUE) + 
-      ggtitle(paste("Top 10", v, "Weights for Factor", f)) +
-      theme(axis.text.y = element_text(size = 10)) # Adjust font here
-    
-    # 2. Create a dynamic filename
-    file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/top_", v, "_weights_F", f, ".png")
-    
-    # 3. Save
-    ggsave(file_name, plot = p, width = 9, height = 6, dpi = 300)
-    
-    message(paste("Saved plot for Factor", f, "View", v))
-  }
-}
-
+# {r}
+# plot_variance_explained(mofa_obj, max_r2 =10)
+# 
+# 
+# # --- Top Weights ----------
+# # Plots top n features with the highest absolute loading value
+# # for a specific factor
+# # Good for identifying the main drivers of a factor
+# # high absolute loading value >0.8
+# 
+# target_factors <- 1:4
+# target_views <- c("species", "metabolites")
+# 
+# for (f in target_factors) {
+#   for (v in target_views) {
+#     
+#     # 1. Create the Top Weights plot
+#     p <- plot_top_weights(mofa_obj, 
+#                           view = v, 
+#                           factor = f, 
+#                           nfeatures = 10, 
+#                           scale = TRUE) + 
+#       ggtitle(paste("Top 10", v, "Weights for Factor", f)) +
+#       theme(axis.text.y = element_text(size = 10)) # Adjust font here
+#     
+#     # 2. Create a dynamic filename
+#     file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/top_", v, "_weights_F", f, ".png")
+#     
+#     # 3. Save
+#     ggsave(file_name, plot = p, width = 9, height = 6, dpi = 300)
+#     
+#     message(paste("Saved plot for Factor", f, "View", v))
+#   }
+# }
 ```
 
 Three-view model with pathways
 
 ```{r}
-# ------- Post-hoc Analysis - 3 View Model -------
-
-# Add clinical variables to factors dataframe
-factors_df <- as.data.frame(factors)
-factors_df$sa_abundance <- master_table$sa_abundance[
-  match(rownames(factors_df), master_table$NMR_sample_id)]
-factors_df$EASI <- master_table$EASI[
-  match(rownames(factors_df), master_table$NMR_sample_id)]
-factors_df$lesional <- master_table$lesional[
-  match(rownames(factors_df), master_table$NMR_sample_id)]
-
-# -------- Correlations with all factors (not just 1&2) -------------
-# Now we know Factors 1 and 2 are SA-associated, test all 4
-for(f in paste0("Factor", 1:4)) {
-  cat("\n---", f, "---\n")
-  
-  sa_test <- cor.test(factors_df[[f]],
-                      factors_df$sa_abundance,
-                      method = "spearman", exact = FALSE)
-  cat("SA:   rho =", round(sa_test$estimate, 3),
-      "  p =", round(sa_test$p.value, 3), "\n")
-  
-  easi_test <- cor.test(factors_df[[f]],
-                        factors_df$EASI,
-                        method = "spearman", exact = FALSE)
-  cat("EASI: rho =", round(easi_test$estimate, 3),
-      "  p =", round(easi_test$p.value, 3), "\n")
-}
-
-# -------- Correlations with all clinical variables -------
-clinical_vars <- master_table %>%
-  select(sa_abundance, EASI, age, TEWL_mean, pH_mean,
-         weeks_since_last_TCS_or_TCI) %>%
-  mutate(
-    TEWL_mean = as.numeric(gsub("none|not_done", NA, TEWL_mean)),
-    pH_mean = as.numeric(gsub("none|not_done", NA, pH_mean)),
-    EASI = as.numeric(EASI),
-    age = as.numeric(age)
-  )
-clinical_vars <- clinical_vars[
-  match(rownames(factors_df), master_table$NMR_sample_id), ]
-
-# Test all 4 factors against all clinical variables
-for(f in paste0("Factor", 1:4)) {
-  cat("\n======", f, "======\n")
-  for(v in colnames(clinical_vars)) {
-    test <- cor.test(factors_df[[f]], clinical_vars[[v]],
-                     method = "spearman", exact = FALSE)
-    cat(v, ": rho =", round(test$estimate, 3),
-        "  p =", round(test$p.value, 3), "\n")
-  }
-}
-
-# -------- Lesionality -------
-F1_lesional <- ggplot(factors_df, aes(x = lesional, y = Factor1, 
-                                       fill = lesional)) +
-  geom_boxplot() +
-  geom_jitter(width = 0.1) +
-  scale_fill_manual(values = c("LES" = "#F8766D", "NON_LES" = "#00BFC4")) +
-  labs(title = "Factor 1 scores by lesional status") +
-  theme_classic()
-
-wilcox.test(Factor1 ~ lesional, data = factors_df)
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_Lesionality_3view.png",
-       plot = F1_lesional, width = 8, height = 5, dpi = 300)
-
-# Test all factors against lesionality
-for(f in paste0("Factor", 1:4)) {
-  test <- wilcox.test(factors_df[[f]] ~ factors_df$lesional)
-  cat(f, ": p =", round(test$p.value, 3), "\n")
-}
-
-# -------- Variance explained -------
-plot_variance_explained(mofa_obj, max_r2 = 10)
-
-# -------- Top weights - now includes pathways view -------
-target_factors <- 1:4
-target_views <- c("species", "metabolites", "pathways")  # added pathways
-
-for(f in target_factors) {
-  for(v in target_views) {
-    p <- plot_top_weights(mofa_obj,
-                          view = v,
-                          factor = f,
-                          nfeatures = 10,
-                          scale = TRUE) +
-      ggtitle(paste("Top 10", v, "Weights for Factor", f)) +
-      theme(axis.text.y = element_text(size = 10))
-    
-    file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/top_",
-                        v, "_weights_F", f, "_3view.png")
-    ggsave(file_name, plot = p, width = 9, height = 6, dpi = 300)
-    message(paste("Saved plot for Factor", f, "View", v))
-  }
-}
-
-# Factor 1 scores by SA abundance - scatter plot
-factors_df$sa_abundance <- as.numeric(factors_df$sa_abundance)
-
-p_f1_sa <- ggplot(factors_df, aes(x = sa_abundance, y = Factor1, 
-                                   colour = lesional)) +
-  geom_point(size = 3) +
-  geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") +
-  scale_colour_manual(values = c("LES" = "#E41A1C", "NON_LES" = "#377EB8")) +
-  labs(title = "MOFA+ Factor 1 vs SA Abundance",
-       x = "SA Abundance (%)",
-       y = "Factor 1 Score",
-       colour = "Lesional Status") +
-  annotate("text", x = max(factors_df$sa_abundance, na.rm = TRUE) * 0.1,
-           y = max(factors_df$Factor1, na.rm = TRUE) * 0.9,
-           label = "rho = -0.776, p < 0.001",
-           hjust = 0, size = 4.5) +
-  theme_classic()
-
-p_f1_sa
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_SA_3view.png",
-       plot = p_f1_sa, width = 8, height = 5, dpi = 300, bg = "white")
+# {r} # # ------- Post-hoc Analysis - 3 View Model ------- #  # # Add clinical variables to factors dataframe # factors_df <- as.data.frame(factors) # factors_df$sa_abundance <- master_table$sa_abundance[ #   match(rownames(factors_df), master_table$NMR_sample_id)] # factors_df$EASI <- master_table$EASI[ #   match(rownames(factors_df), master_table$NMR_sample_id)] # factors_df$lesional <- master_table$lesional[ #   match(rownames(factors_df), master_table$NMR_sample_id)] #  # # -------- Correlations with all factors (not just 1&2) ------------- # # Now we know Factors 1 and 2 are SA-associated, test all 4 # for(f in paste0("Factor", 1:4)) { #   cat("\n---", f, "---\n") #    #   sa_test <- cor.test(factors_df[[f]], #                       factors_df$sa_abundance, #                       method = "spearman", exact = FALSE) #   cat("SA:   rho =", round(sa_test$estimate, 3), #       "  p =", round(sa_test$p.value, 3), "\n") #    #   easi_test <- cor.test(factors_df[[f]], #                         factors_df$EASI, #                         method = "spearman", exact = FALSE) #   cat("EASI: rho =", round(easi_test$estimate, 3), #       "  p =", round(easi_test$p.value, 3), "\n") # } #  # # -------- Correlations with all clinical variables ------- # clinical_vars <- master_table %>% #   select(sa_abundance, EASI, age, TEWL_mean, pH_mean, #          weeks_since_last_TCS_or_TCI) %>% #   mutate( #     TEWL_mean = as.numeric(gsub("none|not_done", NA, TEWL_mean)), #     pH_mean = as.numeric(gsub("none|not_done", NA, pH_mean)), #     EASI = as.numeric(EASI), #     age = as.numeric(age) #   ) # clinical_vars <- clinical_vars[ #   match(rownames(factors_df), master_table$NMR_sample_id), ] #  # # Test all 4 factors against all clinical variables # for(f in paste0("Factor", 1:4)) { #   cat("\n======", f, "======\n") #   for(v in colnames(clinical_vars)) { #     test <- cor.test(factors_df[[f]], clinical_vars[[v]], #                      method = "spearman", exact = FALSE) #     cat(v, ": rho =", round(test$estimate, 3), #         "  p =", round(test$p.value, 3), "\n") #   } # } #  # # -------- Lesionality ------- # F1_lesional <- ggplot(factors_df, aes(x = lesional, y = Factor1,  #                                        fill = lesional)) + #   geom_boxplot() + #   geom_jitter(width = 0.1) + #   scale_fill_manual(values = c("LES" = "#F8766D", "NON_LES" = "#00BFC4")) + #   labs(title = "Factor 1 scores by lesional status") + #   theme_classic() #  # wilcox.test(Factor1 ~ lesional, data = factors_df) #  # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_Lesionality_3view.png", #        plot = F1_lesional, width = 8, height = 5, dpi = 300) #  # # Test all factors against lesionality # for(f in paste0("Factor", 1:4)) { #   test <- wilcox.test(factors_df[[f]] ~ factors_df$lesional) #   cat(f, ": p =", round(test$p.value, 3), "\n") # } #  # # -------- Variance explained ------- # plot_variance_explained(mofa_obj, max_r2 = 10) #  # # -------- Top weights - now includes pathways view ------- # target_factors <- 1:4 # target_views <- c("species", "metabolites", "pathways")  # added pathways #  # for(f in target_factors) { #   for(v in target_views) { #     p <- plot_top_weights(mofa_obj, #                           view = v, #                           factor = f, #                           nfeatures = 10, #                           scale = TRUE) + #       ggtitle(paste("Top 10", v, "Weights for Factor", f)) + #       theme(axis.text.y = element_text(size = 10)) #      #     file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/top_", #                         v, "_weights_F", f, "_3view.png") #     ggsave(file_name, plot = p, width = 9, height = 6, dpi = 300) #     message(paste("Saved plot for Factor", f, "View", v)) #   } # } #  # # Factor 1 scores by SA abundance - scatter plot # factors_df$sa_abundance <- as.numeric(factors_df$sa_abundance) #  # p_f1_sa <- ggplot(factors_df, aes(x = sa_abundance, y = Factor1,  #                                    colour = lesional)) + #   geom_point(size = 3) + #   geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") + #   scale_colour_manual(values = c("LES" = "#E41A1C", "NON_LES" = "#377EB8")) + #   labs(title = "MOFA+ Factor 1 vs SA Abundance", #        x = "SA Abundance (%)", #        y = "Factor 1 Score", #        colour = "Lesional Status") + #   annotate("text", x = max(factors_df$sa_abundance, na.rm = TRUE) * 0.1, #            y = max(factors_df$Factor1, na.rm = TRUE) * 0.9, #            label = "rho = -0.776, p < 0.001", #            hjust = 0, size = 4.5) + #   theme_classic() #  # p_f1_sa #  # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_SA_3view.png", #        plot = p_f1_sa, width = 8, height = 5, dpi = 300, bg = "white")
 ```
 
 ## Step 5: Linear **Regressions - Identifying SA High/Low Associated Features**
@@ -3136,74 +1947,86 @@ Identifying molecular signatures driven by SA colonisation, running feature-wise
 
 -   **Validation:** significant results from the linear regression are cross-validated using a non-parametric test (like **Wilcoxon Rank-Sum**) to ensure the differences between high and low groups are robust and not driven by outliers
 
+```{r}
+# Creating the High/Low status based on thresholds
+master_table <- master_table %>%
+  mutate(SA_status = case_when(
+    sa_abundance > 35 ~ "High",
+    sa_abundance < 10 ~ "Low",
+    TRUE ~ NA_character_  # Samples in the 10-35% range become NA
+  ))
+
+# Set 'Low' as the reference for the regression
+master_table$SA_status <- factor(master_table$SA_status, levels = c("Low", "High"))
+
+# Count the samples in each SA_status group, including NAs
+table(master_table$SA_status, useNA = "always")
+```
+
 ### 5.1. Linear Regressions
 
 ```{r}
-# Check the levels
-colnames(master_table)
-# Check the levels
-levels(factor(master_table$sa_abundance))
-levels(factor(master_table$s_aureus_culture_growth_viapath))
 
 # --- 1. Define the Master Regression Function ---
 # This function automates: Data matching, Linear Modeling, and FDR Correction
-# Mutlivariate linear regression: outcome ~ sa_abundance + lesional + pH
-run_omics_regression <- function(data_matrix, master_df, predictor_col = "sa_abundance") {
+# Mutlivariate linear regression: outcome ~ SA_status + lesional + pH
+run_omics_regression <- function(data_matrix, master_df, predictor_col = "SA_status") {
   
   results_list <- list()
   common_ids <- intersect(rownames(data_matrix), master_df$NMR_sample_id)
   
-  if(length(common_ids) == 0) stop("Error: Zero matching IDs found. Check your rownames!")
+  # Filter master_df to only include matching IDs once to speed up match()
+  master_sub <- master_df[master_df$NMR_sample_id %in% common_ids, ]
 
   for(feature in colnames(data_matrix)) {
     
-    # Force everything to be numeric/factor and handle potential empty strings
-    val_outcome    <- as.numeric(as.character(data_matrix[common_ids, feature]))
-    val_predictor  <- as.numeric(as.character(master_df[[predictor_col]][match(common_ids, master_df$NMR_sample_id)]))
-    val_lesional   <- as.factor(master_df$lesional[match(common_ids, master_df$NMR_sample_id)])
-    val_pH         <- as.numeric(as.character(master_df$pH[match(common_ids, master_df$NMR_sample_id)]))
+    # 1. Prepare Data
+    # Match the order of master_sub to the order of common_ids (rownames of matrix)
+    idx <- match(common_ids, master_sub$NMR_sample_id)
     
     df_temp <- data.frame(
-      outcome      = val_outcome,
-      sa_abundance = val_predictor,
-      lesional     = val_lesional,
-      pH           = val_pH
+      outcome   = as.numeric(as.character(data_matrix[common_ids, feature])),
+      SA_group  = as.factor(master_sub[[predictor_col]][idx]),
+      lesional  = as.factor(master_sub$lesional[idx]),
+      pH        = as.numeric(as.character(master_sub$pH[idx]))
     )
     
-    # Remove any rows with NAs (this fixes the "Coercion" issue by dropping bad rows)
+    # 2. Clean Data
     df_temp <- na.omit(df_temp)
     
-    if(nrow(df_temp) < 3) {
-       message(paste("Skipping feature", feature, "- too many NAs"))
-       next
-    }
+    # Need at least one sample in each group to run regression!
+    if(length(unique(df_temp$SA_group)) < 2 || nrow(df_temp) < 5) next
 
+    # 3. Run Model
     model <- tryCatch({
-      lm(outcome ~ sa_abundance + lesional + pH, data = df_temp)
+      lm(outcome ~ SA_group + lesional + pH, data = df_temp)
     }, error = function(e) return(NULL))
     
+    # 4. Extract "High" vs "Low"
     if(!is.null(model)) {
       summ <- summary(model)$coefficients
-      if("sa_abundance" %in% rownames(summ)) {
-        res <- as.data.frame(t(summ["sa_abundance", ]))
+      # Because SA_group is the variable, the row is ALWAYS "SA_groupHigh"
+      if("SA_groupHigh" %in% rownames(summ)) {
+        res <- as.data.frame(t(summ["SA_groupHigh", ]))
         res$feature <- feature
         results_list[[feature]] <- res
       }
     }
   }
   
+  if(length(results_list) == 0) stop("No significant coefficients found. Check group sizes!")
+  
   final_df <- do.call(rbind, results_list)
-  # Fix column names to match standard LM output
   colnames(final_df) <- c("Estimate", "Std_Error", "t_value", "p_value", "feature")
   final_df$p_adjusted <- p.adjust(final_df$p_value, method = "fdr")
   return(final_df)
 }
 
 # 1. Run the SA-Metabolite Regressions
-results_metabolites <- run_omics_regression(nmr_matched, master_table)
+results_metabolites <- run_omics_regression(nmr_matched, master_table, predictor_col="SA_status")
 
 # 2. Run the SA-Pathway Regressions
-results_pathways <- run_omics_regression(pathway_matched, master_table)
+results_pathways <- run_omics_regression(pathway_matched, master_table, predictor_col="SA_status")
 
 # --- 4. Quick View of Top Hits ---
 print("Top SA-Associated Metabolites:")
@@ -3230,6 +2053,165 @@ pathway_hits <- results_pathways[results_pathways$p_value < 0.05, ]
 write.csv(pathway_hits, 
           "~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Pathway_Hits_p05.csv", row.names = FALSE)
 
+```
+
+```{r}
+# --- 1. Define the Helper Function ---
+create_sa_boxplot <- function(df, y_var, title_label) {
+  # Remove NAs in the grouping variable so they don't show up in the plot
+  plot_data <- df[!is.na(df$SA_status), ]
+  
+  ggplot(plot_data, aes(x = SA_status, y = .data[[y_var]], fill = SA_status)) +
+    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
+    geom_jitter(width = 0.2, size = 2, alpha = 0.6) +
+    scale_fill_manual(values = c("Low" = "#56B4E9", "High" = "#D55E00")) +
+    labs(title = title_label, 
+         subtitle = "Comparison of SA-High vs SA-Low",
+         x = "S. aureus Status", 
+         y = "Relative Abundance") +
+    theme_minimal() +
+    theme(legend.position = "none",
+          plot.title = element_text(face = "bold", size = 14))
+}
+
+# --- 2. Prepare Unique Data Frames for Plotting ---
+# Extract metadata columns we need to avoid "duplicate column" errors
+meta_cols <- master_table[, c("NMR_sample_id", "SA_status", "lesional", "pH_mean")]
+
+# Prepare Metabolite Data
+nmr_df <- as.data.frame(nmr_matched, check.names = FALSE)
+nmr_df$NMR_sample_id <- rownames(nmr_df)
+plot_master <- merge(nmr_df, meta_cols, by = "NMR_sample_id")
+
+# Prepare Pathway Data
+path_df <- as.data.frame(pathway_matched, check.names = FALSE)
+path_df$NMR_sample_id <- rownames(path_df)
+plot_pathways <- merge(path_df, meta_cols, by = "NMR_sample_id")
+
+# --- 3. Generate and Save Metabolite Plots ---
+for(met in metabolite_hits$feature) {
+  # Check if the feature actually exists in the plotting data
+  if(met %in% colnames(plot_master)) {
+    p <- create_sa_boxplot(plot_master, met, paste("Metabolite:", met))
+    
+    ggsave(filename = paste0("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Metabolite_", met, ".png"), 
+           plot = p, width = 6, height = 5, dpi = 300)
+  }
+}
+
+# --- 4. Generate and Save Top 5 Pathway Plots ---
+# Sort by p-value to get the most significant ones
+top_pathways <- pathway_hits[order(pathway_hits$p_value), ]
+top_5_names <- head(top_pathways$feature, 5)
+
+for(path in top_5_names) {
+  if(path %in% colnames(plot_pathways)) {
+    # Clean the filename for saving (remove slashes/special chars)
+    clean_name <- gsub("[^[:alnum:]]", "_", substr(path, 1, 30))
+    
+    p <- create_sa_boxplot(plot_pathways, path, "Pathway Abundance") +
+         labs(subtitle = path)
+    
+    ggsave(filename = paste0("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_", clean_name, ".png"), 
+           plot = p, width = 8, height = 6, dpi = 300)
+  }
+}
+
+# 1. Grab Top 5 Metabolites (sorted by p-value)
+top_met_df <- metabolite_hits[order(metabolite_hits$p_value), ]
+top_met_df <- head(top_met_df, 5)
+top_met_df$type <- "Metabolite"
+
+# 2. Grab Top 5 Pathways (sorted by p-value)
+top_path_df <- pathway_hits[order(pathway_hits$p_value), ]
+top_path_df <- head(top_path_df, 5)
+top_path_df$type <- "Pathway"
+
+# 3. Combine them
+plot_summary <- rbind(top_met_df, top_path_df)
+
+# Shorten long pathway names so they fit on the graph
+plot_summary$feature_short <- substr(plot_summary$feature, 1, 40)
+
+
+
+library(stringr) # Needed for wrapping text
+# Function to convert p-value to stars
+get_stars <- function(p) {
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("ns")
+}
+
+# Apply to your summary data
+plot_summary$stars <- sapply(plot_summary$p_value, get_stars)
+
+# Create a combined label for the Y-axis (e.g., "Glycerol ***")
+plot_summary$labeled_feature <- paste0(plot_summary$feature, " ", plot_summary$stars)
+
+# Filter for top metabolites
+plot_met <- plot_summary[plot_summary$type == "Metabolite", ]
+
+meta_top <- ggplot(plot_met, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error), 
+                 height = 0.3, linewidth = 1, color = "#D55E00") + 
+  geom_point(size = 5, color = "#D55E00") + 
+  # Add stars next to the points
+  geom_text(aes(label = stars), hjust = -0.5, vjust = -0.5, size = 6, color = "black") +
+  labs(title = "Metabolic Shifts: High vs Low SA",
+       subtitle = "(* p < 0.05, ** p < 0.01, *** p < 0.001)",
+       x = "Regression Estimate (NMR Intensity)",
+       y = NULL) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 14, face = "bold"),
+        plot.title = element_text(face = "bold", size = 18))
+
+ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Metabolites_Significance.png", meta_top, width = 7, height = 4)
+
+
+# 1. Filter for pathways only
+plot_path <- plot_summary[plot_summary$type == "Pathway", ]
+
+# 2. Clean dots to spaces for better wrapping
+plot_path$feature_clean <- gsub("\\.", " ", plot_path$feature)
+
+# 3. Create the Plot
+ggplot(plot_path, aes(x = Estimate, y = reorder(feature_clean, Estimate))) +
+  # Reference line at zero
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  # Error bars (Estimate +/- Std_Error)
+  geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error), 
+                 height = 0.3, linewidth = 1, color = "#009E73") + 
+  # Mean points
+  geom_point(size = 5, color = "#009E73") + 
+  # --- ADD STARS ON ERROR BARS ---
+  # hjust = -0.5 pushes it slightly to the right of the error bar end
+  geom_text(aes(x = Estimate + Std_Error, label = stars), 
+            hjust = -0.3, vjust = 0.4, size = 6, color = "black", fontface = "bold") +
+  # -------------------------------
+  # Wrap the long pathway names
+  scale_y_discrete(labels = function(x) str_wrap(x, width = 35)) +
+  labs(title = "Microbial Pathway Shifts: High vs Low SA",
+       subtitle = paste("Significance levels:", "(* p < 0.05, ** p < 0.01, *** p < 0.001)"),
+       x = "Regression Estimate (Abundance)",
+       y = NULL) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 14, color = "gray30"),
+    axis.text.y = element_text(size = 11, face = "bold", lineheight = 0.8),
+    axis.text.x = element_text(size = 12),
+    axis.title.x = element_text(size = 14, vjust = -0.5),
+    panel.grid.minor = element_blank(),
+    # Increase left margin to accommodate the wrapped names
+    plot.margin = margin(t = 10, r = 50, b = 10, l = 80) 
+  )
+
+# 4. Save the high-res image
+ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathways_Significance.png", 
+       width = 12, height = 6, dpi = 300)
 ```
 
 ### 5.2. Spearman's Correlations
@@ -3328,22 +2310,33 @@ ggsave("~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Pathway_Hits.png", 
 ### Figuring out what the unknown metabolites are
 
 ```{r}
+
+```
+
+```{r}
 # 1. Define which columns are metabolites (Leucine to Unknown 4)
 # You can adjust these numbers if the range is different!
 met_cols <- 2:37 
 
 # 2. Clean and convert in one go
-NMR_meta[, met_cols] <- lapply(NMR_meta[, met_cols], function(x) {
+#NMR_meta[, met_cols] <- lapply(NMR_meta[, met_cols], function(x) {
   # Remove literal quotes
-  x <- gsub('"', '', x)
+ # x <- gsub('"', '', x)
   # Remove leading/trailing spaces
-  x <- trimws(x)
+ # x <- trimws(x)
   # Convert the cleaned text to a number
-  as.numeric(x)
-})
+ # as.numeric(x)
+#})
 class(NMR_meta)
 str(NMR_meta)
 
 attr(NMR_meta, "ppm") 
 attributes(NMR_meta)
+
+colnames(master_table)
+```
+
+```{r}
+head(master_table$sa_abundance)
+
 ```
