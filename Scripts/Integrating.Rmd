@@ -29,6 +29,7 @@ library(lme4)
 library(lmerTest)
 library(compositions)
 library(MultiAssayExperiment)
+library(Seurat)
 ```
 
 ### Load Data
@@ -2360,7 +2361,7 @@ So step 5 shows that certain metabolites/pathways are correlated with S. aureus 
 
 Will run a loop for each metabolite and pathway to see if any are significant mediators. Using bootstrapped confidence intervals (n=5000 permutations), ending up with an estimate of the indirect effect to build the CI.
 
-Scaled the pathways to handle the tiny abundance numbers. Used logistic regression because lesional is binary.
+Scaled (Z-scores) the pathways to handle the tiny abundance numbers. Used logistic regression because lesional is binary.
 
 ```{r}
 # Load the required library
@@ -2462,4 +2463,130 @@ print(mediation_pathway_results)
 write.csv(mediation_pathway_results, 
           "~/Desktop/Research_Project/Scripts/Integration/Mediation/Mediation_Results_Pathways.csv", 
           row.names = FALSE)
+```
+
+# Tier 2: scRNA-seq Mechanistic Subset
+
+## Load Single Cell RNA-seq Data
+
+Loading the merged Seurat object
+
+```{r}
+# 1. Define the path
+file_path <- "~/Desktop/iawards/single cell/abu/abu onedrive contents/Bioinformatics/scRNAseq/r_adata_microbiome.rds"
+
+# 2. Load the data
+# Since the file is a Gzipped Workspace (RDX3 header), we use load() + gzfile()
+if (file.exists(file_path)) {
+  load(gzfile(file_path))
+  message("Success: Object 'adata' loaded into environment.")
+} else {
+  stop("File not found. Please check the OneDrive sync status.")
+}
+
+# 3. Verify and Inspect
+# Check dimensions and layers
+print(adata)
+
+# Check the first few features to see if they are Genes or Taxa
+head(rownames(adata))
+```
+
+## QC
+
+Excluded cells with less than 200 genes and \>5% mitochondrial gene expression
+
+```{r}
+# 1. Join all layers into one single matrix
+all_counts <- JoinLayers(adata[["RNA"]])
+
+# 2. Re-create the Seurat Object from scratch using the unified matrix
+# This resets the metadata and aligns the cell names perfectly
+adata_new <- CreateSeuratObject(counts = all_counts, project = "Epidermis_QC")
+
+# 3. Transfer any existing metadata if it exists (like Lesional vs Non-Lesional)
+# If your old 'adata' had a column named 'group', we pull it here:
+# adata_new$condition <- adata$condition # (Only if you know the column name)
+
+# 4. Calculate Mitochondrial percentage
+adata_new[["percent.mt"]] <- PercentageFeatureSet(adata_new, pattern = "^MT-")
+
+# 5. Apply your specific filtering parameters
+# nFeature_RNA > 200 and percent.mt < 5
+adata_filtered <- subset(adata_new, subset = nFeature_RNA > 200 & percent.mt < 5)
+
+# 6. Check the final count
+print(paste("Cells remaining after QC:", ncol(adata_filtered)))
+
+head(adata@meta.data, 10)
+
+# 1. Sync the names between your Matrix and Metadata
+# This ensures that 'percent.mt' and 'les' actually talk to each other
+common_cells <- intersect(colnames(adata_new), rownames(adata@meta.data))
+
+# Subset the new object to only include cells present in the metadata
+adata_final <- subset(adata_new, cells = common_cells)
+
+# 2. Attach your original metadata (les, s_aureus, etc.)
+# We use the [common_cells, ] index to keep the order perfect
+adata_final@meta.data <- adata@meta.data[common_cells, ]
+
+# 3. Calculate percent.mt (Now it will NOT be NA)
+adata_final[["percent.mt"]] <- PercentageFeatureSet(adata_final, pattern = "^MT-")
+
+# 4. Apply your specific QC Parameters
+# Exclude: less than 200 genes OR more than 5% mitochondrial
+adata_qc <- subset(adata_final, subset = nFeature_RNA > 200 & percent.mt < 5)
+
+# 5. Verify the results
+print(paste("Total cells after QC:", ncol(adata_qc)))
+
+# Check the Lesional (2,940) vs Non-Lesional (5,253) split
+table(adata_qc$les)
+
+# 1. Force the matrix cell names to match the metadata row names (1, 2, 3...)
+# This assumes the order hasn't been shuffled
+colnames(adata_new) <- rownames(adata@meta.data)
+
+# 2. Now add the metadata back in
+adata_new@meta.data <- adata@meta.data
+
+# 3. Recalculate percent.mt (It should finally work now!)
+adata_new[["percent.mt"]] <- PercentageFeatureSet(adata_new, pattern = "^MT-")
+
+# 4. Apply your specific QC Parameters
+# nFeature_RNA > 200 and percent.mt < 5
+adata_qc <- subset(adata_new, subset = nFeature_RNA > 200 & percent.mt < 5)
+
+# 5. Check the Results
+print(paste("Total cells after QC:", ncol(adata_qc)))
+
+# 6. Check the Lesional vs Non-Lesional split
+table(adata_qc$les)
+
+table(adata_qc$clusters)
+# See how many cells come from each of your 6 original layers
+table(adata_qc$orig.ident, adata_qc$les)
+```
+
+Make two groups, the whole cleaned single cell dataset (20,877 cells) and the epidermis-only subset (8,193 cells, only IFE and Kertinocytes). This is what Helen did in previous analysis. The full set will be used to study SA interactions with T-cells and the overall skin microenvironment and the subset will be used to study Filaggrin (FLG) expression, differentation defects and how the skin structure breaks down during an eczema flare.
+
+```{r}
+# 1. Define the Epidermal barrier clusters
+# (Excluding T-cells, B-cells, Melanocytes, Fibroblasts, and Follicles)
+epidermis_barrier <- c("IFE B", "IFE SB", "KER1", "KER2")
+
+# 2. Subset the data
+adata_barrier <- subset(adata_qc, subset = clusters %in% epidermis_barrier)
+
+# 3. Check the split (Target: ~2,940 lesional / ~5,253 non-lesional)
+table(adata_barrier$les)
+```
+
+## Step 8: Cell Type Annotation
+
+SingleR annotation of the scRNA-seq data to confrim which cell types are present and check cell number per sample per cell type to see which are sufficiently abundant for downstream analysis.
+
+```{r}
+
 ```
