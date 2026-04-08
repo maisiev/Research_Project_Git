@@ -2958,7 +2958,7 @@ print(table(adata_qc$sample, adata_qc$les))
 
 ```
 
-### DESeq2 
+### DESeq2
 
 ```{r}
 
@@ -2974,6 +2974,7 @@ mat <- pseudo_res$RNA
 # -----------------------------------
 # -- some samples are from the same patients, so account for this ---
 library(DESeq2)
+library(tidyverse)
 
 # 1. Get the list of all clusters
 all_clusters <- unique(adata_qc$clusters)
@@ -3180,6 +3181,7 @@ power_clusters <- c("IFE C", "OB", "KER1", "IFE B", "T CELL")
 main_dir <- "~/Desktop/Research_Project/Scripts/DEGs/Correlation_Results/"
 if (!dir.exists(main_dir)) dir.create(main_dir)
 
+
 for (cluster in power_clusters) {
   
   # Clean the name for folder/file creation (replace spaces with underscores for the OS)
@@ -3235,7 +3237,7 @@ for (cluster in power_clusters) {
       theme_bw() +
       theme(panel.grid = element_blank()) +
       labs(title = paste(cluster, "| Gene:", gene),
-           x = "S. aureus Load", y = "Log-Normalized Expression") +
+           x = "S. aureus Load", y = "Log-Normalised Expression") +
       scale_color_manual(values = c("Lesional" = "#e41a1c", "Non-Lesional" = "#377eb8"))
 
     ggsave(filename = paste0(cluster_dir, "Correlation_", gene, ".png"), 
