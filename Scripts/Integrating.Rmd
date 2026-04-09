@@ -1975,8 +1975,6 @@ if(any(sapply(experiments(mae_two_view), function(x) any(is.na(assay(x)))))) {
 
 ```
 
-### `/`
-
 ### 4.2. Train MOFA+ Model
 
 ```{r}
@@ -2482,6 +2480,101 @@ pathway_hits <- results_pathways[results_pathways$p_value < 0.05, ]
 write.csv(pathway_hits, 
           "~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Pathway_Hits_p05.csv", row.names = FALSE)
 
+
+# --- Pathway → Metabolite Regressions ---
+# Model: Metabolite ~ Microbial_Pathway + pH + Lesionality
+# For each pathway, test its association with each metabolite
+
+run_pathway_metabolite_regression <- function(nmr_matrix, pathway_matrix, master_df) {
+  
+  results_list <- list()
+  
+  # Common IDs across all three data sources
+  common_ids <- Reduce(intersect, list(
+    rownames(nmr_matrix),
+    rownames(pathway_matrix),
+    master_df$NMR_sample_id
+  ))
+  
+  master_sub <- master_df[master_df$NMR_sample_id %in% common_ids, ]
+  idx <- match(common_ids, master_sub$NMR_sample_id)
+  
+  # Pull covariates once (same for every model)
+  lesional_vec <- as.factor(master_sub$lesional[idx])
+  pH_vec       <- as.numeric(as.character(master_sub$pH[idx]))
+  
+  for(pathway in colnames(pathway_matrix)) {
+    
+    pathway_vec <- as.numeric(as.character(pathway_matrix[common_ids, pathway]))
+    
+    for(metabolite in colnames(nmr_matrix)) {
+      
+      metabolite_vec <- as.numeric(as.character(nmr_matrix[common_ids, metabolite]))
+      
+      df_temp <- na.omit(data.frame(
+        outcome  = metabolite_vec,
+        pathway  = pathway_vec,
+        lesional = lesional_vec,
+        pH       = pH_vec
+      ))
+      
+      if(nrow(df_temp) < 5) next
+      
+      model <- tryCatch({
+        lm(outcome ~ pathway + lesional + pH, data = df_temp)
+      }, error = function(e) return(NULL))
+      
+      if(!is.null(model)) {
+        summ <- summary(model)$coefficients
+        if("pathway" %in% rownames(summ)) {
+          res <- as.data.frame(t(summ["pathway", ]))
+          res$metabolite <- metabolite
+          res$pathway    <- pathway
+          results_list[[paste(pathway, metabolite, sep = "__")]] <- res
+        }
+      }
+    }
+  }
+  
+  final_df <- do.call(rbind, results_list)
+  colnames(final_df)[1:4] <- c("Estimate", "Std_Error", "t_value", "p_value")
+  final_df$p_adjusted <- p.adjust(final_df$p_value, method = "fdr")
+  return(final_df)
+}
+
+# Run it
+results_path_met <- run_pathway_metabolite_regression(nmr_matched, pathway_matched, master_table)
+
+# View top hits
+head(results_path_met[results_path_met$p_value < 0.05, 
+                       c("pathway", "metabolite", "Estimate", "p_value", "p_adjusted")])
+
+# Save full results
+write.csv(results_path_met,
+          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Regressions_Full.csv",
+          row.names = FALSE)
+
+# Save significant hits only
+path_met_hits <- results_path_met[results_path_met$p_value < 0.05, ]
+write.csv(path_met_hits,
+          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Hits_p05.csv",
+          row.names = FALSE)
+
+# 1. Did it actually produce results?
+nrow(results_path_met)
+
+# 2. Any fully empty rows?
+sum(is.na(results_path_met$Estimate))
+
+# 3. How many significant hits?
+sum(results_path_met$p_value < 0.05, na.rm = TRUE)
+
+# 4. Any hits surviving FDR correction?
+sum(results_path_met$p_adjusted < 0.05, na.rm = TRUE)
+
+# 5. Preview top hits sorted by p-value
+head(results_path_met[order(results_path_met$p_value), 
+                       c("pathway", "metabolite", "Estimate", "p_value", "p_adjusted")])
 ```
 
 ```{r}
@@ -2775,6 +2868,170 @@ ggplot(high_conf_path_plot, aes(x = Estimate, y = reorder(feature_clean, Estimat
 # 3. Save with a "landscape" aspect ratio
 ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Hits.png", 
        width = 15, height = 11, dpi = 300)
+
+# --- Spearman Validation for Pathway-Metabolite Pairs ---
+spearman_path_met_results <- list()
+
+common_ids <- Reduce(intersect, list(
+  rownames(nmr_matched),
+  rownames(pathway_matched),
+  master_table$NMR_sample_id
+))
+
+# Only validate pairs that passed FDR correction to save time
+fdr_hits <- results_path_met[results_path_met$p_adjusted < 0.05, ]
+
+for(i in 1:nrow(fdr_hits)) {
+  path <- fdr_hits$pathway[i]
+  met  <- fdr_hits$metabolite[i]
+  
+  x <- as.numeric(pathway_matched[common_ids, path])
+  y <- as.numeric(nmr_matched[common_ids, met])
+  
+  df_temp <- na.omit(data.frame(x = x, y = y))
+  
+  if(nrow(df_temp) > 5) {
+    test <- cor.test(df_temp$x, df_temp$y, method = "spearman", exact = FALSE)
+    spearman_path_met_results[[paste(path, met, sep = "__")]] <- data.frame(
+      pathway     = path,
+      metabolite  = met,
+      rho         = as.numeric(test$estimate),
+      p_spearman  = as.numeric(test$p.value)
+    )
+  }
+}
+
+spearman_path_met_df <- do.call(rbind, spearman_path_met_results)
+
+# --- Merge and Filter High-Confidence Pairs ---
+high_conf_path_met <- merge(fdr_hits, spearman_path_met_df, by = c("pathway", "metabolite"))
+high_conf_path_met <- high_conf_path_met[high_conf_path_met$p_spearman < 0.05, ]
+
+# Sort by FDR p-value
+high_conf_path_met <- high_conf_path_met[order(high_conf_path_met$p_adjusted), ]
+
+nrow(high_conf_path_met) # How many pairs survived both tests?
+head(high_conf_path_met[, c("pathway", "metabolite", "Estimate", "rho", "p_value", "p_adjusted", "p_spearman")], 10)
+
+# Save
+write.csv(high_conf_path_met,
+          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Pathway_Metabolite_Pairs.csv",
+          row.names = FALSE)
+
+library(ggplot2)
+library(stringr)
+library(reshape2)
+
+# ── Shared helper (same as before) ──────────────────────────────────────────
+get_stars <- function(p) {
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("ns")
+}
+high_conf_path_met$stars <- sapply(high_conf_path_met$p_value, get_stars)
+
+# ════════════════════════════════════════════════════════════════════════════
+# PLOT 1 — Heatmap of High-Confidence Pathway–Metabolite Pairs
+# (mirrors the role of your boxplots — shows the landscape of associations)
+# ════════════════════════════════════════════════════════════════════════════
+# ── Filter to top 20 most significant pathways ──────────────────────────────
+top_pathways_heatmap <- high_conf_path_met %>%
+  group_by(pathway) %>%
+  summarise(best_p = min(p_adjusted)) %>%
+  arrange(best_p) %>%
+  slice_head(n = 20) %>%
+  pull(pathway)
+
+heatmap_filtered <- high_conf_path_met[high_conf_path_met$pathway %in% top_pathways_heatmap, ]
+
+# ── Clean pathway names: strip PWY codes, replace dots, wrap ────────────────
+heatmap_filtered$pathway_clean <- gsub("PWY[0-9\\-]*\\s*", "", heatmap_filtered$pathway)
+heatmap_filtered$pathway_clean <- gsub("\\.", " ", heatmap_filtered$pathway_clean)
+heatmap_filtered$pathway_clean <- str_wrap(heatmap_filtered$pathway_clean, width = 40)
+
+# ── Plot ─────────────────────────────────────────────────────────────────────
+max_abs <- max(abs(heatmap_filtered$Estimate), na.rm = TRUE)
+
+heatmap_plot2 <- ggplot(heatmap_filtered,
+                        aes(x = metabolite, y = pathway_clean, fill = Estimate)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  geom_text(aes(label = stars), size = 4, color = "white", fontface = "bold") +
+  scale_fill_gradient2(
+    low      = "#D55E00",
+    mid      = "white",
+    high     = "#56B4E9",
+    midpoint = 0,
+    limits   = c(-max_abs, max_abs),
+    name     = "Regression\nEstimate"
+  ) +
+  labs(
+    title    = "Microbial Pathway → Metabolite Associations",
+    subtitle = "Top 20 Pathways by FDR | * p<0.05  ** p<0.01  *** p<0.001",
+    x        = "Metabolite",
+    y        = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title      = element_text(face = "bold", size = 16),
+    plot.subtitle   = element_text(size = 12, color = "gray30"),
+    axis.text.x     = element_text(angle = 45, hjust = 1, size = 11, face = "bold"),
+    axis.text.y     = element_text(size = 10, face = "bold", lineheight = 0.9),
+    legend.title    = element_text(size = 12, face = "bold"),
+    legend.text     = element_text(size = 10),
+    panel.grid      = element_blank(),
+    plot.margin     = margin(t = 10, r = 30, b = 20, l = 10)
+  )
+
+ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Heatmap_Top20.png",
+       heatmap_plot2, width = 16, height = 10, dpi = 300)
+
+# ════════════════════════════════════════════════════════════════════════════
+# PLOT 2 — Top 20 Pairs Forest/Bar Plot
+# (mirrors your Metabolites_Significance and Pathways_Significance plots)
+# ════════════════════════════════════════════════════════════════════════════
+
+# Create a readable pair label
+top20 <- head(high_conf_path_met[order(high_conf_path_met$p_adjusted), ], 20)
+top20$pair_label <- paste0(
+  str_trunc(gsub("\\.", " ", top20$pathway), 35), 
+  "  →  ", 
+  top20$metabolite
+)
+top20$pair_label <- paste0(top20$pair_label, "  ", top20$stars)
+
+pair_plot <- ggplot(top20, aes(x = Estimate, 
+                                y = reorder(pair_label, Estimate),
+                                fill = Estimate > 0)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
+  scale_fill_manual(
+    values = c("#D55E00", "#56B4E9"),
+    labels = c("Decreased with Pathway Activity", "Increased with Pathway Activity"),
+    name   = "Direction of Change"
+  ) +
+  labs(
+    title    = "Top 20 Pathway–Metabolite Associations",
+    subtitle = "High-Confidence Pairs (FDR & Spearman p < 0.05)",
+    x        = "Regression Estimate (Effect Size)",
+    y        = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title    = element_text(face = "bold", size = 18),
+    plot.subtitle = element_text(size = 14, color = "gray30"),
+    axis.text.y   = element_text(size = 11, face = "bold"),
+    axis.text.x   = element_text(size = 12),
+    axis.title.x  = element_text(size = 14),
+    legend.position = "bottom",
+    legend.title  = element_text(size = 14, face = "bold"),
+    legend.text   = element_text(size = 12),
+    legend.key.size = unit(1, "cm"),
+    plot.margin   = margin(t = 10, r = 30, b = 10, l = 10)
+  )
+
+ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Top20.png",
+       pair_plot, width = 14, height = 9, dpi = 300)
 ```
 
 ## Step 6: Mediation Analysis
@@ -3043,7 +3300,7 @@ target_ids <- c("A17", "A18", "A21", "A22", "A37", "A38")
 bridge_clean <- as.data.frame(seq_metadata_filt) %>%
   mutate(scRNA_ID = regmatches(as.character(seq_id), regexpr("A[0-9]+", as.character(seq_id)))) %>%
   filter(scRNA_ID %in% target_ids) %>%
-  select(scRNA_ID, eg_id) %>%
+  dplyr::select(scRNA_ID, eg_id) %>%
   distinct()
 
 #------- VOLCANO PLOTS----------------
@@ -3211,7 +3468,7 @@ power_clusters <- c("IFE C", "OB", "KER1", "IFE B", "T CELL")
 s_aureus_map <- master_table %>%
   mutate(eg_id = as.character(eg_id)) %>%
   left_join(bridge_clean, by = "eg_id", relationship = "many-to-many") %>%
-  select(sample = scRNA_ID, 
+  dplyr::select(sample = scRNA_ID, 
          s_aureus = sa_abundance, 
          SA_status = SA_status) %>%
   filter(!is.na(sample)) %>% 
@@ -3303,7 +3560,7 @@ for (cluster in power_clusters) {
 # 1. Create a clean metadata dataframe to add
 # This links the 'orig.ident' in Seurat to the 'SA_status' in your map
 metadata_to_add <- s_aureus_map %>%
-  select(sample, SA_status) %>%
+  dplyr::select(sample, SA_status) %>%
   distinct()
 
 # 2. Match the rows correctly to the Seurat object
@@ -3462,6 +3719,133 @@ ggplot(plot_data, aes(x = clusters, y = mean_LINC, fill = detailed_status)) +
 dev.off()
 
 
+```
+
+### Hypergeometric Tests
+
+Validating my findings using published dataset (Patrick et. al. (2023)) to see if the link between SA abundance and certain genes is significant, this helps account for the low n.
+
+|  |  |  |
+|------------------------|------------------------|------------------------|
+| **Object Name** | **What it is** | **Use it for...** |
+| **`mat`** | Pseudobulk count matrix | Calculations and Loops. |
+| **`s_aureus_map`** | SA Abundance % per Patient | Mapping bacteria to expression. |
+| **`plot_data`** | A temporary dataframe | Creating the bar/violin plots. |
+| **`sa_correlations_master`** | The new object | **Hypergeometric Tests.** |
+
+```{r}
+# ============================================================
+# PART 1: PREPARE REFERENCE DATA & MAPPING
+# ============================================================
+library(org.Hs.eg.db)
+library(dplyr)
+library(tibble)
+
+# 1. Load your AD reference data (skipping the 2 header rows)
+# Adjust the filename as needed
+ref_genes <- read_excel("~/Desktop/Research_Project/Scripts/DEGs/Hypergeometric_Tests/AD_Reference_DEGs.xlsx", skip = 2) 
+
+# 2. Map Ensembl IDs to Symbols locally (Faster than biomaRt)
+sa_ensembl_ids <- c("ENSG00000229807", "ENSG00000230002", "ENSG00000237955")
+
+bm_map <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys    = sa_ensembl_ids,
+  columns = c("ENSEMBL", "SYMBOL", "GENETYPE"),
+  keytype = "ENSEMBL"
+)
+
+# Rename columns to standard format
+colnames(bm_map) <- c("ensembl_gene_id", "external_gene_name", "gene_biotype")
+
+# ============================================================
+# PART 2: THE HYPERGEOMETRIC TEST (UNIVERSE CORRECTION)
+# ============================================================
+
+# 1. Define the Shared Universe
+# CRITICAL: We only test genes that were measured in BOTH datasets
+all_your_genes <- rownames(mat)
+all_ref_genes  <- ref_genes$Gene
+shared_universe <- intersect(all_your_genes, all_ref_genes)
+N_universe      <- length(shared_universe)
+
+cat("Universe size (shared genes):", N_universe, "\n")
+
+# 2. Identify your Top Hits (Filtered by Shared Universe)
+my_top_pos_symbols <- sa_correlations_master %>% 
+  arrange(desc(Spearman_r)) %>% 
+  head(500) %>% 
+  pull(Gene) %>%
+  intersect(shared_universe)
+
+my_top_neg_symbols <- sa_correlations_master %>% 
+  arrange(Spearman_r) %>% 
+  head(500) %>% 
+  pull(Gene) %>%
+  intersect(shared_universe)
+
+# 3. Identify Reference AD Hits (Filtered by Shared Universe)
+ref_up_symbols <- ref_genes %>% 
+  filter(adj.P.Val < 0.05 & logFC > 0) %>% 
+  pull(Gene) %>%
+  intersect(shared_universe)
+
+ref_down_symbols <- ref_genes %>% 
+  filter(adj.P.Val < 0.05 & logFC < 0) %>% 
+  pull(Gene) %>%
+  intersect(shared_universe)
+
+# 4. Calculate Overlaps
+overlap_pos <- length(intersect(my_top_pos_symbols, ref_up_symbols))
+overlap_neg <- length(intersect(my_top_neg_symbols, ref_down_symbols))
+
+# 5. Run the Hypergeometric Tests (phyper)
+p_val_pos <- phyper(
+  overlap_pos - 1, 
+  length(ref_up_symbols), 
+  N_universe - length(ref_up_symbols), 
+  length(my_top_pos_symbols), 
+  lower.tail = FALSE
+)
+
+p_val_neg <- phyper(
+  overlap_neg - 1, 
+  length(ref_down_symbols), 
+  N_universe - length(ref_down_symbols), 
+  length(my_top_neg_symbols), 
+  lower.tail = FALSE
+)
+
+# ============================================================
+# PART 3: TARGETED LINC/XIST SEARCH
+# ============================================================
+
+# Search for the hit across its many aliases (Atopic Dermatitis context)
+target_aliases <- c("LINC01128", "XIST", "ENSG00000229807", "LOC100294145", "AL627309")
+
+search_results <- ref_genes %>% 
+  filter(Gene %in% target_aliases | grepl("AL627309", Gene, ignore.case = TRUE))
+
+# ============================================================
+# PART 4: PRINT RESULTS
+# ============================================================
+cat("\n=== ATOPIC DERMATITIS VALIDATION RESULTS ===")
+cat("\nUniverse (Shared Genes):", N_universe)
+
+cat("\n\n--- POSITIVE CORRELATION (Inflammatory Signal) ---")
+cat("\nOverlap with Reference Up-regulated:", overlap_pos)
+cat("\nP-value:", p_val_pos)
+
+cat("\n\n--- NEGATIVE CORRELATION (Barrier Collapse) ---")
+cat("\nOverlap with Reference Down-regulated:", overlap_neg)
+cat("\nP-value:", p_val_neg)
+
+cat("\n\n--- TARGETED SEARCH FOR LINC01128/XIST ---")
+if(nrow(search_results) > 0) {
+  print(search_results)
+} else {
+  cat("\nNo specific matches found for the LINC01128/XIST aliases in the reference list.")
+}
 ```
 
 Make two groups, the whole cleaned single cell dataset (20,877 cells) and the epidermis-only subset (8,193 cells, only IFE and Kertinocytes). This is what Helen did in previous analysis. The full set will be used to study SA interactions with T-cells and the overall skin microenvironment and the subset will be used to study Filaggrin (FLG) expression, differentation defects and how the skin structure breaks down during an eczema flare.
