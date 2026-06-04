@@ -660,11 +660,12 @@ pathway_plot_df <- data.frame(
   lesional     = meta_matched_clean$lesional
 )
 
-plot_pw_continuous <- function(x_var, title) {
+
+plot_pw_continuous <- function(x_var, title, label_y_pos) {
   ggplot(pathway_plot_df, aes(x = .data[[x_var]], y = PC1)) +
     geom_point(size = 3) +
     geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
-    stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+    stat_cor(method = "spearman", label.x.npc = "left", label.y = label_y_pos, size = 5) +
     labs(title = title, x = x_var,
          y = paste0("PCo1 (", pcoa_var[1], "%)")) +
     theme_classic() + my_theme
@@ -682,11 +683,11 @@ plot_pw_categorical <- function(x_var, title) {
     theme(legend.position = "none")
 }
 
-p1 <- plot_pw_continuous("sa_abundance", "SA Abundance vs Pathway PCo1")
-p2 <- plot_pw_continuous("EASI",         "EASI vs Pathway PCo1")
-p3 <- plot_pw_continuous("pH_mean",      "pH vs Pathway PCo1")
-p4 <- plot_pw_continuous("TEWL_mean",    "TEWL vs Pathway PCo1")
-p5 <- plot_pw_continuous("age",          "Age vs Pathway PCo1")
+p1 <- plot_pw_continuous("sa_abundance", "SA Abundance vs Pathway PCo1", label_y_pos = 0.275)
+p2 <- plot_pw_continuous("EASI",         "EASI vs Pathway PCo1", label_y_pos = 0.275)
+p3 <- plot_pw_continuous("pH_mean",      "pH vs Pathway PCo1", label_y_pos = 0.275)
+p4 <- plot_pw_continuous("TEWL_mean",    "TEWL vs Pathway PCo1", label_y_pos = 0.275)
+p5 <- plot_pw_continuous("age",          "Age vs Pathway PCo1", label_y_pos = 0.275)
 p6 <- plot_pw_categorical("lesional",    "Lesional vs Pathway PCo1")
 
 pathway_confounder_plot <- (p1 + p2 + p3) / (p4 + p5 + p6) +
@@ -695,6 +696,8 @@ pathway_confounder_plot <- (p1 + p2 + p3) / (p4 + p5 + p6) +
 print(pathway_confounder_plot)
 ggsave("~/Desktop/Research_Project/Scripts/Integration/Confounders/pathway_confounder_pcoa.png",
        plot = pathway_confounder_plot, width = 15, height = 10, dpi = 300)
+ggsave("~/Desktop/Research_Project/Scripts/Integration/Confounders/pathway_ph.png",
+       plot = p3, width = 6, height = 5, dpi = 300)
 ```
 
 ## Step 3: Confirm S. Aureus Structures the Microbiome Composition
