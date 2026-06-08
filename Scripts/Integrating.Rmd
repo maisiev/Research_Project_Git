@@ -14,6 +14,7 @@ date: "2026-03-10"
 ```
 
 ```{r}
+# Load dependencies
 library(readxl)
 library(dplyr)
 library(ggplot2)
@@ -153,7 +154,7 @@ Need to link these so that the object with SA abundance now has info on who the 
 # Convert sample_meta sample_number to character to match sa_linked
 sample_meta$sample_number <- as.character(sample_meta$sample_number)
 
-# Now run the join
+# run the join
 sa_linked2 <- sa_linked %>%
   left_join(
     sample_meta %>% 
@@ -237,6 +238,7 @@ master_table <- sa_df %>%
   left_join(pathways %>% select(-sample),
             by = c("sample_short" = "sample_short"))
 
+# Validation of master table 
 master_table
 dim(master_table)                          
 length(unique(master_table$eg_id))         
@@ -246,20 +248,20 @@ colSums(is.na(master_table))
 
 ```
 
-## Step 2: Confounder Checking
+## Step 2: Confounder Analysis
 
-Plotting S. aureus abundance against age, EASI score, treatment washout, TWEL and pH across 9 patients. Seeing if any of the variables correlate with SA/pathway abundance.
+Confounder analysis and multi-omic alignment. Determine if clinical or environmental variables are driving observed changes in metabolomics and pathway data, rather than S. aureus abundance.
 
-Spearman correlations.
+Plotting S. aureus abundance against age, EASI score, treatment washout, TEWL and pH across 9 patients. Seeing if any variables correlate with SA/pathway abundance.
 
-Flag anything that should be carried as a covariate downstream.
+Spearman correlations. Flag anything that should be carried as a covariate downstream.
 
-### 2.1. Aggregate to Patient Level
+### 2.1. Data Aggregation and Cleaning
 
-Some samples are from the same patient, for these, merge the clinical variables to just one repeat per patient.
+Collapse master table to patient-level summary to ensure that visual comparisons of the confounders represent unique individuals rather than multiple samples from the same person. Also clean, normalise and standardise the clinical variables, converting 'none' strings to NA and enforcing numeric format. This enables correct statistical analysis.
 
 ```{r}
-# One row per patient for visualisation only
+# Collapses master table to one row per patient for visualisation only 
 patient_level <- master_table %>%
   group_by(eg_id) %>%
   summarise(
@@ -276,33 +278,30 @@ patient_level <- master_table %>%
 
 print(patient_level)
 
-# -------- Clean Systemic Treatment -------------
-# Systemic treatment column is numeric and text -> convert to binary
-# Convert weeks_since_last_systemic to binary
-# never = no recent systemic treatment
-# anything else = had systemic treatment
+# -------- Standardise and Clean Clinical Variables -------------
+# Clean clinical variables: convert 'none' strings to NA and ensure numeric format
 patient_level <- patient_level %>%
-  mutate(had_systemic = ifelse(
-    weeks_since_last_systemic == "never", 
-    "never", "yes"))
+  mutate(
+    # Clean systemic treatment
+    had_systemic = if_else(weeks_since_last_systemic == "never", "never", "yes"),
+    
+    # Clean numeric columns 
+    across(
+      c(TEWL_mean, pH_mean, days_since_any_topicals),
+      ~ as.numeric(if_else(.x == "none", NA_character_, .x))
+    )
+  )
 
 print(patient_level %>% select(eg_id, mean_sa, had_systemic))
 ```
 
 ### 2.2. SA Confounder Plots
 
-Plotting variables to see if any associate with S. aureus levels.
+Visualising continuous variables using ggplot2 scatter plots to see relationship between potential confounders and S. aureus abundance. Plotting linear regression lines (geom_smooth) and Spearman correlation coefficients (stat_cor) to provide visual and statistical check for correlations.
 
-Using scatter plots with spearman R value displayed on plots via stat_cor for visual correlation.
+Visualising categorical confounders using boxplots, comparing S. aureus levels between patients who have and have not received systemic treatment.
 
 ```{r}
-patient_level <- patient_level %>%
-  mutate(
-    TEWL_mean = as.numeric(ifelse(TEWL_mean == "none", NA, TEWL_mean)),
-    pH_mean = as.numeric(ifelse(pH_mean == "none", NA, pH_mean)),
-    days_since_any_topicals = as.numeric(ifelse(days_since_any_topicals == "none", NA, days_since_any_topicals))
-  )
-
 # Plot theme
 my_theme <-
   theme(
@@ -411,6 +410,7 @@ spearman_results <- lapply(confounders, function(var) {
 }) %>% bind_rows
 rownames(spearman_results) <- NULL
 
+# Save
 write.csv(spearman_results, 
           file = "~/Desktop/Research_Project/Scripts/Integration/Confounders/SA_Confounders.csv",
           row.names = TRUE)
@@ -424,13 +424,11 @@ print(spearman_results)
 The SA-specific confounder checks use all the samples and run a univerate test (one SA variable vs all clinical variables). Whereas the metabolite and pathway confounder checks require matches objects, which are filtered, aligned versions of the datasets, restricted to the samples that have data in all three modalities (used later for MOFA+ too). This ensures everything lines up row by row.
 
 ```{r}
-# =========================================================
 # Create matched matrices (18 samples with all three modalities)
 # Notes:
 # - GYECZ1193 BACK excluded - no NMR data (corrected in nmr_shotgun at load time)
 # - GYECZ0776 and GYECZ1111 excluded - no microbiome data
 # - Final aligned dataset: 18 samples
-# =========================================================
 
 # ------- Prepare NMR matrix --------------
 load("~/Desktop/iawards/NMR metabolomics/NMR_peakarea_metadata.RData")
@@ -487,25 +485,22 @@ all(rownames(species_matched) == rownames(meta_matched))    # TRUE
 head(meta_matched)
 ```
 
-### 2.5. Pathway & Metabolite Confounders
+### 2.5. Multivariate Statistical Testing and Dimensionality Reduction
 
-Do any of the clinical variables co-vary with microbial pathway or metabolite levels? Multivariate testing.
+Do any of the clinical variables co-vary with microbial pathway or metabolite levels? Run multivariate testing to test how much variance is explained by each confounder.
 
 Same variables are tested against both datasets.
 
--   PERMANOVA (via adonis2 with Bray-Curtis dissimilarity) is used for pathway composition because there are 248 pathways, so this multivariate test is needed. (Bray-Curtis dissimilarity is suited to ecology/microbial data to quantify differences in species abundances).
+-   PERMANOVA (via adonis2 with Bray-Curtis dissimilarity, from vegan package) is used for pathway composition because there are 248 pathways, so this multivariate test is needed. (Bray-Curtis dissimilarity is suited to microbial data to quantify differences in species abundances).
 
 -   PERMANOVA (but with Euclidian distance instead of Bray-Curtis) is used for metabolite data.
 
 -   For the scatter plots, variables are plot against PC1/PCo1 of metabolites/pathways respectively
 
-Datasets are reduced to 2D using PCA (metabolites) and PCoA (pathways, to preserve Bray-Curtis distances)
+Datasets are reduced to 2D using PCA (metabolites) and PCoA (pathways, to preserve Bray-Curtis distances). Plot these components against confounders to see if main variance in data clusters by any clinical factors.
 
 ```{r}
-# =========================================================
 # 2.5. Confounder Checks (Multivariate)
-# =========================================================
-
 # List of potential confounders for individual screening
 confounders <- c("age", "EASI", "weeks_since_last_TCS_or_TCI",
                  "TEWL_mean", "pH_mean", "sa_abundance", "lesional")
@@ -520,7 +515,7 @@ meta_matched$pH_mean       <- as.numeric(meta_matched$pH_mean)
 
 # ---- 2.5.2 Pathway PERMANOVA (Screening + Primary Model) ----
 
-# 1. Screening Individual Variables
+# Screening Individual Variables
 pathway_screening <- lapply(confounders, function(var) {
   df <- meta_matched_clean[!is.na(meta_matched_clean[[var]]), ]
   pw <- pathway_matched_clean[rownames(df), ]
@@ -530,7 +525,7 @@ pathway_screening <- lapply(confounders, function(var) {
   data.frame(variable = var, R2 = round(test$R2[1], 3), p_value = round(test$`Pr(>F)`[1], 3))
 }) %>% bind_rows()
 
-# 2. PRIMARY MODEL: SA adjusted for pH
+# PRIMARY MODEL: SA adjusted for pH
 # Only use samples where both SA and pH data exist
 pathway_complete <- meta_matched_clean[complete.cases(meta_matched_clean[, c("sa_abundance", "pH_mean")]), ]
 pw_dist_complete <- vegdist(pathway_matched_clean[rownames(pathway_complete), ], method = "bray")
@@ -548,7 +543,7 @@ print(pathway_primary_model)
 
 # ---- 2.5.3 Metabolite PERMANOVA (Screening + Primary Model) ----
 
-# 1. Screening Individual Variables
+# Screening Individual Variables
 metabolite_screening <- lapply(confounders, function(var) {
   df <- meta_matched[!is.na(meta_matched[[var]]), ]
   nm <- nmr_matched[rownames(df), ]
@@ -558,7 +553,7 @@ metabolite_screening <- lapply(confounders, function(var) {
   data.frame(variable = var, R2 = round(test$R2[1], 3), p_value = round(test$`Pr(>F)`[1], 3))
 }) %>% bind_rows()
 
-# 2. PRIMARY MODEL: SA adjusted for pH
+# PRIMARY MODEL: SA adjusted for pH
 met_complete <- meta_matched[complete.cases(meta_matched[, c("sa_abundance", "pH_mean")]), ]
 nm_scaled    <- scale(nmr_matched[rownames(met_complete), ])
 met_dist_complete <- dist(nm_scaled, method = "euclidean")
@@ -580,11 +575,8 @@ meta_metab_clean    <- meta_matched   # Use the matched metadata
 write.csv(pathway_screening, "~/Desktop/Research_Project/Scripts/Integration/Confounders/Pathway_Confounders.csv")
 write.csv(metabolite_screening, "~/Desktop/Research_Project/Scripts/Integration/Confounders/Metabolite_Confounders.csv")
 
-# ---- 2.5.5 Visualisation Prep (PCA/PCoA) ----------------
-# [Keep your existing plotting logic for m1-m6 and p1-p6 here]
-# [These plots are excellent for showing the raw relationship before adjustment]
 
-# ---- 2.5.4 Shared plot theme ----------------------------
+# ---- 2.3.5 Shared plot theme ----------------------------
 my_theme <- theme(
   plot.title = element_text(size = 16, face = "bold"),
   axis.title = element_text(size = 16),
@@ -592,10 +584,13 @@ my_theme <- theme(
   axis.text.x = element_text(angle = 45, hjust = 1)
 )
 
-# ---- 2.5.5 Metabolite PCA -------------------------------
+# ---- 2.5.6 Metabolite PCA -------------------------------
+# Reduce NMR data into few PCs
 metabolite_pca <- prcomp(nmr_matched, scale. = TRUE)
+# Calulate how much of total variance in metabolome is captured by first two PCs
 var_explained  <- round(summary(metabolite_pca)$importance[2, 1:2] * 100, 1)
 
+# Merge PCA results with clinical metadata into single table for plotting
 meta_plot_df <- data.frame(
   PC1          = metabolite_pca$x[, 1],
   PC2          = metabolite_pca$x[, 2],
@@ -607,6 +602,8 @@ meta_plot_df <- data.frame(
   lesional     = meta_matched$lesional
 )
 
+# Scatter plot for numerical factors
+# Adds linear regression line (geom_smooth) and statistical test (stat_cor) to look for significant correlations between metabolites profiles and factors
 plot_met_continuous <- function(x_var, title) {
   ggplot(meta_plot_df, aes(x = .data[[x_var]], y = PC1)) +
     geom_point(size = 3) +
@@ -617,6 +614,7 @@ plot_met_continuous <- function(x_var, title) {
     theme_classic() + my_theme
 }
 
+# Boxplots to compare categorical groups, comparing metabolic profile (PC1) 
 plot_met_categorical <- function(x_var, title) {
   ggplot(meta_plot_df, aes(x = .data[[x_var]], y = PC1,
                             colour = .data[[x_var]])) +
@@ -629,6 +627,7 @@ plot_met_categorical <- function(x_var, title) {
     theme(legend.position = "none")
 }
 
+# Plot
 m1 <- plot_met_continuous("sa_abundance", "SA Abundance vs Metabolite PC1")
 m2 <- plot_met_continuous("EASI",         "EASI vs Metabolite PC1")
 m3 <- plot_met_continuous("pH_mean",      "pH vs Metabolite PC1")
@@ -640,15 +639,22 @@ metabolite_confounder_plot <- (m1 + m2 + m3) / (m4 + m5 + m6) +
   plot_annotation(title = "Metabolite Composition by Confounder (PCA)")
 
 print(metabolite_confounder_plot)
+# Save
 ggsave("~/Desktop/Research_Project/Scripts/Integration/Confounders/metabolite_confounder_pca.png",
        plot = metabolite_confounder_plot, width = 15, height = 10, dpi = 300)
 
-# ---- 2.5.6 Pathway PCoA ---------------------------------
+# ---- 2.5.7 Pathway PCoA ---------------------------------
+# PCoA is more suited to microbiome data than PCA, better at handling the high zero counts and focuses on relative composition of pathways between samples
+
+# Distance matrix (vegdist), calulating how 'different' each sample is from every other based on its pathway profile. Using Bray-Curtis distance.
+# Dimensionality reduction (cmdscale), takes distance matrix and projects into 2D space, physical distance between points represents similarity
 pathway_pcoa <- cmdscale(vegdist(pathway_matched_clean, method = "bray"),
                          k = 2, eig = TRUE)
 eig_vals  <- pathway_pcoa$eig
+# Variance calculation (pcoa_var), calculates how much of total variation in pathway profiles is explained by the first two axes.
 pcoa_var  <- round(eig_vals[1:2] / sum(eig_vals[eig_vals > 0]) * 100, 1)
 
+# Merges PCoA results with clinical metadata into single table for plotting
 pathway_plot_df <- data.frame(
   PC1          = pathway_pcoa$points[, 1],
   PC2          = pathway_pcoa$points[, 2],
@@ -660,7 +666,8 @@ pathway_plot_df <- data.frame(
   lesional     = meta_matched_clean$lesional
 )
 
-
+# Scatter plot for numerical factors
+# Adds linear regression line (geom_smooth) and statistical test (stat_cor) to look for significant correlations between pathway profiles and factors
 plot_pw_continuous <- function(x_var, title, label_y_pos) {
   ggplot(pathway_plot_df, aes(x = .data[[x_var]], y = PC1)) +
     geom_point(size = 3) +
@@ -671,6 +678,7 @@ plot_pw_continuous <- function(x_var, title, label_y_pos) {
     theme_classic() + my_theme
 }
 
+# Boxplots to compare categorical groups, comparing pathway profile (PCo1) 
 plot_pw_categorical <- function(x_var, title) {
   ggplot(pathway_plot_df, aes(x = .data[[x_var]], y = PC1,
                                colour = .data[[x_var]])) +
@@ -683,6 +691,7 @@ plot_pw_categorical <- function(x_var, title) {
     theme(legend.position = "none")
 }
 
+# Plot
 p1 <- plot_pw_continuous("sa_abundance", "SA Abundance vs Pathway PCo1", label_y_pos = 0.275)
 p2 <- plot_pw_continuous("EASI",         "EASI vs Pathway PCo1", label_y_pos = 0.275)
 p3 <- plot_pw_continuous("pH_mean",      "pH vs Pathway PCo1", label_y_pos = 0.275)
@@ -694,6 +703,7 @@ pathway_confounder_plot <- (p1 + p2 + p3) / (p4 + p5 + p6) +
   plot_annotation(title = "Pathway Composition by Confounder (PCoA)")
 
 print(pathway_confounder_plot)
+# Save
 ggsave("~/Desktop/Research_Project/Scripts/Integration/Confounders/pathway_confounder_pcoa.png",
        plot = pathway_confounder_plot, width = 15, height = 10, dpi = 300)
 ggsave("~/Desktop/Research_Project/Scripts/Integration/Confounders/pathway_ph.png",
