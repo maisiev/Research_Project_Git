@@ -280,15 +280,15 @@ print(patient_level)
 
 # -------- Standardise and Clean Clinical Variables -------------
 # Clean clinical variables: convert 'none' strings to NA and ensure numeric format
+
 patient_level <- patient_level %>%
   mutate(
     # Clean systemic treatment
     had_systemic = if_else(weeks_since_last_systemic == "never", "never", "yes"),
-    
     # Clean numeric columns 
     across(
       c(TEWL_mean, pH_mean, days_since_any_topicals),
-      ~ as.numeric(if_else(.x == "none", NA_character_, .x))
+      ~ as.numeric(na_if(as.character(.x), "none"))
     )
   )
 
@@ -716,44 +716,631 @@ Phyloseq object with samples and taxa that matches the species table.
 
 The samples are paired
 
-### 3a.1. Add the metadata and SA high/low grouping
+```{r}
+library(phyloseq)
+library(vegan)
+library(lme4)
+library(lmerTest)
+library(dplyr)
+library(tibble)
+library(ggplot2)
+library(ggpubr)
+library(patchwork)
+library(reshape2)
+ 
+SEED <- 123
+ 
+# --- Output directory ---
+results_dir <- "~/Desktop/Research_Project/Scripts/Integration/SA_Effect/Cleaned/"
+dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
+ 
+# --- Samples manually excluded from ALL omics layers ---
+# No data
+manual_drops <- c("P22757_140_S22_L001d_metagenome")
+```
+
+### 3.1. Add Metadata and SA Grouping
 
 The SA distribution is heavily skewed towards high SA - 16 out of 20 samples have SA above 30%. This means a simple median split at 67% gives you 10 high and 10 low, which is balanced, but the "low" group still has quite high SA values (up to 67%).
 
 I will use the median split for the formal PERMANOVA then use continuous SA abundance in the Mantel test which avoids the binary split problem.
 
 ```{r}
-
-# Create metadata dataframe matched to phyloseq sample names
-
-# Match master_table to phyloseq sample names using sample_id
+## METADATA SETUP & SA GROUPING
 physeq_meta <- master_table %>%
-  select(sample_id, eg_id, sample_site, lesional, 
+  select(sample_id, eg_id, sample_site, lesional,
          sa_abundance, EASI, age, sex,
          weeks_since_last_TCS_or_TCI,
          TEWL_mean, pH_mean) %>%
   column_to_rownames("sample_id")
-
-# Add metadata to phyloseq object
+ 
 sample_data(physeq) <- sample_data(physeq_meta)
-
-# ------- S. Aureus high/low Grouping ---------
-# Median split for PERMANOVA
+ 
+# Median split for PERMANOVA / beta-dispersion grouping
 median_sa <- median(sample_data(physeq)$sa_abundance)
 cat("Median SA abundance:", median_sa, "\n")
-
+ 
 sample_data(physeq)$sa_group <- ifelse(
   sample_data(physeq)$sa_abundance >= median_sa,
-  "SA_high", "SA_low")
+  "SA_high", "SA_low"
+)
+print(table(sample_data(physeq)$sa_group))
+ 
+```
 
-table(sample_data(physeq)$sa_group)
+### 3.2. Sample Filtering
+
+```{r}
+## SAMPLE FILTERING 
+ 
+otu_raw  <- as.data.frame(t(otu_table(physeq)))   # samples as rows
+meta_raw <- data.frame(sample_data(physeq))
+meta_raw$pH_mean <- as.numeric(as.character(meta_raw$pH_mean))
+ 
+zero_samples  <- rownames(otu_raw)[rowSums(otu_raw) == 0]
+na_ph_samples <- rownames(meta_raw)[is.na(meta_raw$pH_mean)]
+ 
+all_drops <- unique(c(zero_samples, na_ph_samples, manual_drops))
+cat("Dropping samples from all omics layers:\n")
+print(all_drops)
+ 
+keep_samples <- setdiff(rownames(otu_raw), all_drops)
+ 
+microbiome_data <- otu_raw[keep_samples, ]
+microbiome_meta <- meta_raw[keep_samples, ]
+ 
+stopifnot(identical(rownames(microbiome_data), rownames(microbiome_meta)))
+cat("Final microbiome N =", nrow(microbiome_meta), "\n")
+ 
+microbiome_dist <- vegdist(microbiome_data, method = "bray")
+ 
+```
+
+### 3.3. Define Functions
+
+```{r}
+## FUNCTIONS 
+ 
+# Align pathway/metabolite tables to the (already-filtered) microbiome metadata via "eg_id.SITE.STATUS" bridge IDs, then drop any samples with all-zero rows for that layer 
+align_omics_table <- function(omics_table, meta) {
+ 
+  meta <- meta %>%
+    mutate(
+      les_clean  = gsub("NON_LES", "NONLES", lesional),
+      site_clean = toupper(sample_site),
+      bridge_id  = paste(eg_id, site_clean, les_clean, sep = ".")
+    )
+ 
+  aligned <- omics_table[meta$bridge_id, , drop = FALSE]
+  rownames(aligned) <- rownames(meta)
+  aligned[is.na(aligned)] <- 0
+ 
+  keep <- rowSums(aligned) > 0
+ 
+  list(data = aligned[keep, , drop = FALSE],
+       meta = meta[keep, ])
+}
+ 
+# PERMANOVA with a safeguard that the expected terms exist
+run_permanova <- function(dist_mat, meta, seed = SEED) {
+ 
+  set.seed(seed)
+  result <- adonis2(
+    dist_mat ~ pH_mean + sa_group,
+    data         = meta,
+    permutations = 999,
+    by           = "margin",
+    strata       = meta$eg_id
+  )
+ 
+  required_terms <- c("pH_mean", "sa_group")
+  missing_terms  <- setdiff(required_terms, rownames(result))
+ 
+  if (length(missing_terms) > 0) {
+    stop(
+      "PERMANOVA output is missing expected term(s): ",
+      paste(missing_terms, collapse = ", "),
+      ". Check factor coding / adonis2() term names before ",
+      "indexing results (e.g. result['sa_group', 'R2'])."
+    )
+  }
+ 
+  result
+}
+ 
+# Partial Mantel: SA abundance vs composition, controlling for pH 
+run_partial_mantel <- function(dist_mat, meta, seed = SEED) {
+  set.seed(seed)
+  mantel.partial(
+    dist_mat,
+    dist(meta$sa_abundance),
+    dist(meta$pH_mean),
+    method       = "spearman",
+    permutations = 999
+  )
+}
+ 
+# --- Beta-dispersion test ---
+run_betadisper <- function(dist_mat, meta, seed = SEED) {
+  set.seed(seed)
+  bd      <- betadisper(dist_mat, group = meta$sa_group, type = "centroid")
+  bd_test <- permutest(bd, permutations = 999, pairwise = TRUE)
+  list(bd = bd, test = bd_test)
+}
+ 
+# ---  Richness LMM (pathway/metabolite richness; microbiome handled separately since it also includes Shannon) ---
+run_richness_lmm <- function(abund_data, meta) {
+ 
+  richness_df <- data.frame(
+    richness     = rowSums(abund_data > 0),
+    sa_abundance = meta$sa_abundance,
+    pH_mean      = meta$pH_mean,
+    eg_id        = meta$eg_id,
+    lesional     = meta$lesional
+  )
+ 
+  model <- lmer(richness ~ sa_abundance + pH_mean + (1 | eg_id), data = richness_df)
+ 
+  list(richness_df = richness_df, model = model, summary = summary(model))
+}
+ 
+# --- Full pipeline for one omics layer: PERMANOVA, beta-dispersion, partial Mantel, richness LMM, and a saved text report ---
+run_omics_block <- function(dist_mat, abund_data, meta, label, results_dir, seed = SEED) {
+ 
+  stopifnot(identical(rownames(abund_data), rownames(meta)))
+ 
+  permanova <- run_permanova(dist_mat, meta, seed)
+  mantel    <- run_partial_mantel(dist_mat, meta, seed)
+  bd        <- run_betadisper(dist_mat, meta, seed)
+  richness  <- run_richness_lmm(abund_data, meta)
+ 
+  report_path <- file.path(results_dir, paste0(label, "_results.txt"))
+  sink(report_path)
+  cat(toupper(label), "RESULTS\n")
+  cat("N =", nrow(meta), "\n")
+  cat("Date:", as.character(Sys.Date()), "\n")
+ 
+  cat("--- 1. PERMANOVA (Bray-Curtis ~ pH_mean + sa_group) ---\n")
+  print(permanova)
+ 
+  cat("\n--- 2. Beta-dispersion (sa_group) ---\n")
+  print(bd$test)
+  cat("\nMean distance to centroid:\n")
+  print(tapply(bd$bd$distances, bd$bd$group, mean))
+ 
+  cat("\n--- 3. Partial Mantel (SA abundance vs composition | pH) ---\n")
+  print(mantel)
+ 
+  cat("\n--- 4. Richness LMM (richness ~ sa_abundance + pH_mean + (1|eg_id)) ---\n")
+  print(richness$summary)
+ 
+  sink()
+  cat("Saved report to:", report_path, "\n")
+ 
+  list(
+    permanova   = permanova,
+    mantel      = mantel,
+    betadisper  = bd,
+    richness    = richness,
+    meta        = meta,
+    dist        = dist_mat
+  )
+}
+ 
+# --- PCoA biplot coloured by SA group (centroids + dispersion) ---
+plot_betadisper_biplot <- function(bd_obj, meta, title, bd_p, permanova_r2,
+                                    colours = c(SA_high = "#404080",
+                                                SA_low  = "#69b3a2")) {
+ 
+  scores_df <- as.data.frame(scores(bd_obj, display = "sites"))
+  scores_df$group     <- meta$sa_group[match(rownames(scores_df), rownames(meta))]
+  scores_df$sample_id <- rownames(scores_df)
+ 
+  centroids_df <- as.data.frame(bd_obj$centroids)
+  centroids_df$group <- rownames(centroids_df)
+ 
+  eig     <- bd_obj$eig
+  eig_pos <- eig[eig > 0]
+  pct     <- round(eig[1:2] / sum(eig_pos) * 100, 1)
+ 
+  disp_vals  <- tapply(bd_obj$distances, bd_obj$group, mean)
+  disp_label <- paste0(names(disp_vals), ": ", round(disp_vals, 3), collapse = "   ")
+ 
+  ggplot() +
+    geom_segment(
+      data = scores_df,
+      aes(x = PCoA1, y = PCoA2,
+          xend = centroids_df$PCoA1[match(group, centroids_df$group)],
+          yend = centroids_df$PCoA2[match(group, centroids_df$group)],
+          colour = group),
+      alpha = 0.35, linewidth = 0.4
+    ) +
+    geom_point(
+      data = scores_df,
+      aes(x = PCoA1, y = PCoA2, fill = group),
+      size = 3, shape = 21, colour = "white", stroke = 0.6
+    ) +
+    geom_point(
+      data = centroids_df,
+      aes(x = PCoA1, y = PCoA2, fill = group),
+      size = 5, shape = 23, colour = "black", stroke = 0.8
+    ) +
+    stat_ellipse(
+      data = scores_df,
+      aes(x = PCoA1, y = PCoA2, colour = group),
+      type = "t", level = 0.95, linewidth = 0.7, linetype = "dashed"
+    ) +
+    scale_colour_manual(values = colours, name = "SA group") +
+    scale_fill_manual(values = colours, name = "SA group") +
+    labs(
+      title = title,
+      subtitle = paste0(
+        "PERMANOVA R\u00b2 = ", round(permanova_r2, 3),
+        "   |   Betadispersion p = ", round(bd_p, 3), "\n",
+        "Mean distance to centroid \u2014 ", disp_label
+      ),
+      x = paste0("PCoA1 (", pct[1], "%)"),
+      y = paste0("PCoA2 (", pct[2], "%)")
+    ) +
+    theme_classic() +
+    theme(
+      plot.title    = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      legend.position = "right"
+    )
+}
+ 
+# --- PCoA biplot with pH fitted as an envfit vector ---
+plot_ph_envfit <- function(bd_obj, meta, title, permanova_r2, seed = SEED) {
+ 
+  scores_df <- as.data.frame(scores(bd_obj, display = "sites"))
+  scores_df$pH       <- as.numeric(meta$pH_mean[match(rownames(scores_df), rownames(meta))])
+  scores_df$sa_group <- meta$sa_group[match(rownames(scores_df), rownames(meta))]
+ 
+  eig     <- bd_obj$eig
+  eig_pos <- eig[eig > 0]
+  pct     <- round(eig[1:2] / sum(eig_pos) * 100, 1)
+ 
+  complete_idx <- !is.na(scores_df$pH)
+  env_data     <- data.frame(pH = scores_df$pH[complete_idx])
+ 
+  set.seed(seed)
+  ef <- envfit(
+    scores_df[complete_idx, c("PCoA1", "PCoA2")],
+    env_data,
+    permutations = 999,
+    na.rm = TRUE
+  )
+ 
+  arrow_scale  <- 0.4
+  ef_scores    <- as.data.frame(scores(ef, display = "vectors"))
+  ef_scores$r2 <- ef$vectors$r
+  ef_scores$p  <- ef$vectors$pvals
+  ef_scores$label <- paste0("pH  R\u00b2=", round(ef_scores$r2, 2),
+                             "  p=", round(ef_scores$p, 3))
+ 
+  arrow_df <- data.frame(
+    x = 0, y = 0,
+    xend = ef_scores$PCoA1 * arrow_scale,
+    yend = ef_scores$PCoA2 * arrow_scale
+  )
+ 
+  ggplot(scores_df, aes(x = PCoA1, y = PCoA2)) +
+    geom_point(aes(fill = pH, shape = sa_group),
+               size = 3.5, colour = "white", stroke = 0.6) +
+    scale_fill_gradient2(
+      low = "#3288BD", mid = "#FFFFBF", high = "#D53E4F",
+      midpoint = median(scores_df$pH, na.rm = TRUE),
+      name = "Skin pH", na.value = "grey70"
+    ) +
+    scale_shape_manual(values = c(SA_high = 21, SA_low = 24), name = "SA group") +
+    geom_segment(
+      data = arrow_df,
+      aes(x = x, y = y, xend = xend, yend = yend),
+      arrow = arrow(length = unit(0.25, "cm"), type = "closed"),
+      colour = "black", linewidth = 0.8
+    ) +
+    geom_text(
+      data = arrow_df,
+      aes(x = xend * 1.12, y = yend * 1.12, label = ef_scores$label),
+      size = 3.2, hjust = 0.5
+    ) +
+    geom_hline(yintercept = 0, colour = "grey80", linewidth = 0.3) +
+    geom_vline(xintercept = 0, colour = "grey80", linewidth = 0.3) +
+    labs(
+      title = title,
+      subtitle = paste0(
+        "PERMANOVA R\u00b2 for pH = ", round(permanova_r2, 3),
+        "   |   envfit R\u00b2 = ", round(ef_scores$r2, 2),
+        "   p = ", round(ef_scores$p, 3)
+      ),
+      x = paste0("PCoA1 (", pct[1], "%)"),
+      y = paste0("PCoA2 (", pct[2], "%)")
+    ) +
+    theme_classic() +
+    theme(
+      plot.title    = element_text(size = 14, face = "bold"),
+      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      legend.position = "right"
+    ) +
+    guides(
+      fill  = guide_colorbar(order = 1, barwidth = 0.8, barheight = 5),
+      shape = guide_legend(order = 2, override.aes = list(fill = "grey50", size = 3))
+    )
+}
+ 
+```
+
+### 3.4. Microbiome
+
+```{r}
+##  MICROBIOME LAYER
+
+microbiome_results <- run_omics_block(
+  dist_mat    = microbiome_dist,
+  abund_data  = microbiome_data,
+  meta        = microbiome_meta,
+  label       = "microbiome",
+  results_dir = results_dir
+)
+ 
+# --- Alpha diversity (Shannon + Observed), separate from pathway/metabolite "richness" since it uses phyloseq::estimate_richness with two metrics ---
+alpha_div <- estimate_richness(physeq, measures = c("Shannon", "Observed"))
+alpha_div <- alpha_div[rownames(microbiome_meta), ]
+alpha_div$sa_abundance <- microbiome_meta$sa_abundance
+alpha_div$pH_mean      <- microbiome_meta$pH_mean
+alpha_div$eg_id        <- microbiome_meta$eg_id
+alpha_div$sa_group     <- microbiome_meta$sa_group
+ 
+shannon_lmm  <- lmer(Shannon  ~ sa_abundance + pH_mean + (1 | eg_id), data = alpha_div)
+observed_lmm <- lmer(Observed ~ sa_abundance + pH_mean + (1 | eg_id), data = alpha_div)
+ 
+shannon_p  <- summary(shannon_lmm)$coefficients["sa_abundance", "Pr(>|t|)"]
+observed_p <- summary(observed_lmm)$coefficients["sa_abundance", "Pr(>|t|)"]
+ 
+alpha_report_path <- file.path(results_dir, "microbiome_alpha_diversity_results.txt")
+sink(alpha_report_path)
+cat("MICROBIOME ALPHA DIVERSITY RESULTS\n")
+cat("Model: metric ~ sa_abundance + pH_mean + (1|eg_id)\n")
+cat("Date:", as.character(Sys.Date()), "\n")
+cat("--- Shannon diversity ---\n")
+print(summary(shannon_lmm))
+cat("\n--- Observed richness ---\n")
+print(summary(observed_lmm))
+sink()
+ 
+p_shannon <- ggplot(alpha_div, aes(x = sa_abundance, y = Shannon)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+  labs(title = "Shannon diversity vs SA",
+       subtitle = paste("LMM p =", format(shannon_p, digits = 2)),
+       x = "SA abundance (%)", y = "Shannon index") +
+  theme_classic()
+ 
+p_observed <- ggplot(alpha_div, aes(x = sa_abundance, y = Observed)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+  labs(title = "Species richness vs SA",
+       subtitle = paste("LMM p =", format(observed_p, digits = 2)),
+       x = "SA abundance (%)", y = "Observed species") +
+  theme_classic()
+ 
+alpha_plot <- p_shannon + p_observed
+ggsave(file.path(results_dir, "microbiome_alpha_diversity_plots.png"),
+       plot = alpha_plot, width = 12, height = 5, dpi = 300, bg = "white")
+ 
+```
+
+### 3.5. Microbial Pathways
+
+```{r}
+##  PATHWAY LAYER
+
+pathway_aligned <- align_omics_table(pathway_matched, microbiome_meta)
+pathway_data <- pathway_aligned$data
+pathway_meta <- pathway_aligned$meta
+pathway_dist <- vegdist(pathway_data, method = "bray")
+ 
+cat("Final pathway N =", nrow(pathway_meta), "\n")
+ 
+pathway_results <- run_omics_block(
+  dist_mat    = pathway_dist,
+  abund_data  = pathway_data,
+  meta        = pathway_meta,
+  label       = "pathway",
+  results_dir = results_dir
+)
+ 
+pathway_p <- pathway_results$richness$summary$coefficients["sa_abundance", "Pr(>|t|)"]
+ 
+p_pathway_rich_sa <- ggplot(pathway_results$richness$richness_df,
+                             aes(x = sa_abundance, y = richness)) +
+  geom_point(size = 3, alpha = 0.7) +
+  geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
+  stat_cor(method = "spearman", label.y.npc = "top") +
+  labs(title = "Pathway richness vs SA",
+       subtitle = paste("LMM p =", format(pathway_p, digits = 3)),
+       x = "SA abundance (%)", y = "Number of pathways") +
+  theme_classic()
+ 
+p_pathway_rich_ph <- ggplot(pathway_results$richness$richness_df,
+                             aes(x = pH_mean, y = richness, colour = lesional)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") +
+  scale_colour_manual(values = c("LES" = "#E41A1C", "NON_LES" = "#377EB8")) +
+  labs(title = "Pathway richness vs skin pH", x = "pH", y = "Pathway richness") +
+  theme_classic()
+ 
+pathway_richness_plot <- p_pathway_rich_sa | p_pathway_rich_ph
+ggsave(file.path(results_dir, "pathway_richness_combined.png"),
+       plot = pathway_richness_plot, width = 12, height = 5, dpi = 300, bg = "white")
+ 
+```
+
+### 3.6. Metabolites
+
+```{r}
 
 
-# --- Remove empty sample "P22757_140_S22_L001d_metagenome" ----
-# 1. Identify and Remove the empty sample from all data objects
-bad_sample <- "P22757_140_S22_L001d_metagenome"
+## METABOLITE LAYER
+metabolite_aligned <- align_omics_table(meta_matched, microbiome_meta)
+metabolite_data <- metabolite_aligned$data
+metabolite_meta <- metabolite_aligned$meta
+metabolite_dist <- vegdist(metabolite_data, method = "bray")
+ 
+cat("Final metabolite N =", nrow(metabolite_meta), "\n")
+ 
+metabolite_results <- run_omics_block(
+  dist_mat    = metabolite_dist,
+  abund_data  = metabolite_data,
+  meta        = metabolite_meta,
+  label       = "metabolite",
+  results_dir = results_dir
+)
+ 
+metabolite_p <- metabolite_results$richness$summary$coefficients["sa_abundance", "Pr(>|t|)"]
+ 
+p_metab_rich_sa <- ggplot(metabolite_results$richness$richness_df,
+                           aes(x = sa_abundance, y = richness)) +
+  geom_point(size = 3, alpha = 0.7, colour = "darkgreen") +
+  geom_smooth(method = "lm", se = TRUE, colour = "darkgreen") +
+  stat_cor(method = "spearman", label.y.npc = "top") +
+  labs(title = "Metabolite richness vs SA",
+       subtitle = paste("LMM p =", format(metabolite_p, digits = 3)),
+       x = "SA abundance (%)", y = "Number of metabolites") +
+  theme_classic()
+ 
+p_metab_rich_ph <- ggplot(metabolite_results$richness$richness_df,
+                           aes(x = pH_mean, y = richness, colour = lesional)) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") +
+  scale_colour_manual(values = c("LES" = "#E41A1C", "NON_LES" = "#377EB8")) +
+  labs(title = "Metabolite richness vs skin pH", x = "pH", y = "Metabolite richness") +
+  theme_classic()
+ 
+metabolite_richness_plot <- p_metab_rich_sa | p_metab_rich_ph
+ggsave(file.path(results_dir, "metabolite_richness_combined.png"),
+       plot = metabolite_richness_plot, width = 12, height = 5, dpi = 300, bg = "white")
+ 
+ 
+```
 
+```{r}
+str(meta_matched)
+sapply(meta_matched, class)
+```
 
+### 3.7. PCoA Biplots
+
+```{r}
+## PCoA BIPLOTS (SA group + pH envfit) FOR ALL THREE LAYERS
+omics_layers <- list(
+  microbiome = microbiome_results,
+  pathway    = pathway_results,
+  metabolite = metabolite_results
+)
+ 
+biplots_sa <- list()
+biplots_ph <- list()
+ 
+for (layer in names(omics_layers)) {
+ 
+  res <- omics_layers[[layer]]
+ 
+  sa_r2 <- res$permanova["sa_group", "R2"]
+  ph_r2 <- res$permanova["pH_mean", "R2"]
+  bd_p  <- res$betadisper$test$tab["Groups", "Pr(>F)"]
+ 
+  biplots_sa[[layer]] <- plot_betadisper_biplot(
+    bd_obj       = res$betadisper$bd,
+    meta         = res$meta,
+    title        = paste0(tools::toTitleCase(layer), " composition by SA group (Bray-Curtis PCoA)"),
+    bd_p         = bd_p,
+    permanova_r2 = sa_r2
+  )
+ 
+  biplots_ph[[layer]] <- plot_ph_envfit(
+    bd_obj       = res$betadisper$bd,
+    meta         = res$meta,
+    title        = paste0(tools::toTitleCase(layer), " composition \u2014 pH gradient (Bray-Curtis PCoA)"),
+    permanova_r2 = ph_r2
+  )
+ 
+  ggsave(file.path(results_dir, paste0(layer, "_biplot_sa.png")),
+         plot = biplots_sa[[layer]], width = 8, height = 6, dpi = 300, bg = "white")
+ 
+  ggsave(file.path(results_dir, paste0(layer, "_biplot_pH.png")),
+         plot = biplots_ph[[layer]], width = 8, height = 6, dpi = 300, bg = "white")
+ 
+  combined <- biplots_sa[[layer]] | biplots_ph[[layer]]
+  ggsave(file.path(results_dir, paste0(layer, "_SA_pH_combined.png")),
+         plot = combined, width = 16, height = 6, dpi = 300, bg = "white")
+ 
+  betadisp_report <- file.path(results_dir, paste0("betadispersion_", layer, ".txt"))
+  sink(betadisp_report)
+  cat(toupper(layer), "BETADISPERSION\n")
+  cat("Distance: Bray-Curtis   |   Group: sa_group\n")
+  cat("Permutations: 999\n\n")
+  print(res$betadisper$test)
+  cat("\nMean distance to centroid per group:\n")
+  print(tapply(res$betadisper$bd$distances, res$betadisper$bd$group, mean))
+  sink()
+}
+ 
+combined_biplots <- biplots_sa$microbiome / biplots_sa$pathway / biplots_sa$metabolite +
+  plot_annotation(
+    title = "Beta-dispersion across omics layers \u2014 SA high vs low",
+    theme = theme(plot.title = element_text(size = 15, face = "bold"))
+  )
+ 
+ggsave(file.path(results_dir, "betadispersion_combined.png"),
+       plot = combined_biplots, width = 9, height = 18, dpi = 300, bg = "white")
+ 
+
+```
+
+```{r}
+## VARIANCE PARTITIONING SUMMARY
+
+variance_df <- bind_rows(lapply(names(omics_layers), function(layer) {
+  perm <- omics_layers[[layer]]$permanova
+  data.frame(
+    Level     = tools::toTitleCase(layer),
+    pH_mean   = perm["pH_mean", "R2"],
+    sa_group  = perm["sa_group", "R2"],
+    Residuals = perm["Residual", "R2"]
+  )
+}))
+ 
+variance_long <- melt(variance_df, id.vars = "Level",
+                       variable.name = "Source", value.name = "R2")
+ 
+variance_plot <- ggplot(variance_long, aes(x = Level, y = R2, fill = Source)) +
+  geom_bar(stat = "identity", colour = "white") +
+  theme_minimal() +
+  scale_fill_manual(values = c("pH_mean" = "#69b3a2",
+                                "sa_group" = "#404080",
+                                "Residuals" = "#d3d3d3")) +
+  labs(title = "Variance partitioning across multi-omic levels",
+       subtitle = "Comparing microbial, functional and metabolomic signal",
+       y = "Proportion of variance (R2)", x = "")
+ 
+ggsave(file.path(results_dir, "CombinedPERM_Variances.png"),
+       plot = variance_plot, width = 6, height = 5, dpi = 300, bg = "white")
+
+writeLines(capture.output(sessionInfo()),
+           con = file.path(results_dir, "session_info.txt"))
+ 
+cat("Analysis complete. All results, plots, and session info\n")
+cat("saved to:", results_dir, "\n")
+
+writeLines(capture.output(sessionInfo()),
+           con = file.path(results_dir, "session_info.txt"))
+ 
+cat("Analysis complete. All results, plots, and session info\n")
+cat("saved to:", results_dir, "\n")
 ```
 
 ### 3a.2. PERMANOVA (Microbiome)
@@ -2385,40 +2972,61 @@ Identifying molecular signatures driven by SA colonisation, running feature-wise
 
     -   **Lesionality:** fixed covariate to make sure associations are driven by SA abundance not just general skin inflammation
 
--   **Multiple Testing Correction:** to account for high number of simultaneous hypotheses (especially in the 248 microbial pathways), p-values are adjusted using Benjamin-Hochberg (FDR)
+-   **Multiple Testing Correction:** to account for high number of simultaneous hypotheses (especially in the 248 microbial pathways), p-values are adjusted using Benjamini-Hochberg (FDR)
 
--   **Validation:** significant results from the linear regression are cross-validated using a non-parametric test (like **Wilcoxon Rank-Sum**) to ensure the differences between high and low groups are robust and not driven by outliers
+-   **Validation:** significant results from the linear regression are cross-validated using Spearman correlation to ensure the differences between high and low groups are robust and not driven by outliers
 
-### 5.1. SA Status Classification
+### 5.1. Setup
 
 ```{r}
-# Define High/Low thresholds and set Low as reference level
+library(ggplot2)
+library(dplyr)
+library(stringr)
+ 
+OUT_DIR <- "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Cleaned/"
+dir.create(OUT_DIR, showWarnings = FALSE, recursive = TRUE)
+
+## ----Define SA high/low groups ------
+# High = sa_abundance > 35, Low = sa_abundance < 10, mid-range -> NA
 master_table <- master_table %>%
   mutate(SA_status = case_when(
     sa_abundance > 35 ~ "High",
     sa_abundance < 10 ~ "Low",
     TRUE              ~ NA_character_
   ))
-
+ 
+# 'Low' set as reference level: regression coefficients reflect the
+# High-vs-Low contrast
 master_table$SA_status <- factor(master_table$SA_status, levels = c("Low", "High"))
-
-# Verify group sizes
+ 
+# Check group sizes (including NA / mid-range samples)
 table(master_table$SA_status, useNA = "always")
+
+## ---- Helper: p-value -> significance stars ---
+
+ 
+get_stars <- function(p) {
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("ns")
+}
 ```
 
-### 5.2. Define Regression Functions
+### 5.2. Linear Regressions
 
 ```{r}
-
-# --- 2a. Multivariate Linear Regression: outcome ~ SA_status + lesional + pH ---
+## ---- Regression functions -----
+ 
+# SA ~ feature, adjusting for lesional status and pH
 run_omics_regression <- function(data_matrix, master_df, predictor_col = "SA_status") {
-  
+ 
   results_list <- list()
   common_ids   <- intersect(rownames(data_matrix), master_df$NMR_sample_id)
   master_sub   <- master_df[master_df$NMR_sample_id %in% common_ids, ]
-  
+ 
   for (feature in colnames(data_matrix)) {
-    
+ 
     idx     <- match(common_ids, master_sub$NMR_sample_id)
     df_temp <- data.frame(
       outcome  = as.numeric(as.character(data_matrix[common_ids, feature])),
@@ -2427,43 +3035,43 @@ run_omics_regression <- function(data_matrix, master_df, predictor_col = "SA_sta
       pH       = as.numeric(as.character(master_sub$pH[idx]))
     )
     df_temp <- na.omit(df_temp)
-    
+ 
     if (length(unique(df_temp$SA_group)) < 2 || nrow(df_temp) < 5) next
-    
+ 
     model <- tryCatch({
       lm(outcome ~ SA_group + lesional + pH, data = df_temp)
     }, error = function(e) return(NULL))
-    
+ 
     if (!is.null(model)) {
       summ <- summary(model)$coefficients
       if ("SA_groupHigh" %in% rownames(summ)) {
-        res          <- as.data.frame(t(summ["SA_groupHigh", ]))
-        res$feature  <- feature
+        res         <- as.data.frame(t(summ["SA_groupHigh", ]))
+        res$feature <- feature
         results_list[[feature]] <- res
       }
     }
   }
-  
+ 
   if (length(results_list) == 0) stop("No significant coefficients found. Check group sizes!")
-  
-  final_df                  <- do.call(rbind, results_list)
-  colnames(final_df)        <- c("Estimate", "Std_Error", "t_value", "p_value", "feature")
-  final_df$p_adjusted       <- p.adjust(final_df$p_value, method = "fdr")
+ 
+  final_df            <- do.call(rbind, results_list)
+  colnames(final_df)  <- c("Estimate", "Std_Error", "t_value", "p_value", "feature")
+  final_df$p_adjusted <- p.adjust(final_df$p_value, method = "fdr")
   return(final_df)
 }
-
-# --- 2b. Spearman Correlation: feature ~ sa_abundance (continuous) ---
+ 
+# Spearman correlation: feature ~ continuous sa_abundance (sensitivity check)
 run_spearman_check <- function(data_matrix, master_df, predictor_col = "sa_abundance") {
-  
+ 
   results_list <- list()
   common_ids   <- intersect(rownames(data_matrix), master_df$NMR_sample_id)
-  
+ 
   for (feature in colnames(data_matrix)) {
-    
+ 
     val_outcome   <- as.numeric(as.character(data_matrix[common_ids, feature]))
     val_predictor <- as.numeric(as.character(master_df[[predictor_col]][match(common_ids, master_df$NMR_sample_id)]))
     df_temp       <- na.omit(data.frame(x = val_predictor, y = val_outcome))
-    
+ 
     if (nrow(df_temp) > 5) {
       test <- cor.test(df_temp$x, df_temp$y, method = "spearman", exact = FALSE)
       results_list[[feature]] <- data.frame(
@@ -2475,114 +3083,100 @@ run_spearman_check <- function(data_matrix, master_df, predictor_col = "sa_abund
   }
   return(do.call(rbind, results_list))
 }
-
-# --- 2c. Pathway -> Metabolite Regression: metabolite ~ pathway + lesional + pH ---
+ 
+# Pathway -> Metabolite regression: metabolite ~ pathway + lesional + pH
 run_pathway_metabolite_regression <- function(nmr_matrix, pathway_matrix, master_df) {
-  
+ 
   results_list <- list()
   common_ids   <- Reduce(intersect, list(
     rownames(nmr_matrix),
     rownames(pathway_matrix),
     master_df$NMR_sample_id
   ))
-  
+ 
   master_sub   <- master_df[master_df$NMR_sample_id %in% common_ids, ]
   idx          <- match(common_ids, master_sub$NMR_sample_id)
   lesional_vec <- as.factor(master_sub$lesional[idx])
   pH_vec       <- as.numeric(as.character(master_sub$pH[idx]))
-  
+ 
   for (pathway in colnames(pathway_matrix)) {
-    
+ 
     pathway_vec <- as.numeric(as.character(pathway_matrix[common_ids, pathway]))
-    
+ 
     for (metabolite in colnames(nmr_matrix)) {
-      
+ 
       metabolite_vec <- as.numeric(as.character(nmr_matrix[common_ids, metabolite]))
-      df_temp        <- na.omit(data.frame(
+      df_temp <- na.omit(data.frame(
         outcome  = metabolite_vec,
         pathway  = pathway_vec,
         lesional = lesional_vec,
         pH       = pH_vec
       ))
-      
+ 
       if (nrow(df_temp) < 5) next
-      
+ 
       model <- tryCatch({
         lm(outcome ~ pathway + lesional + pH, data = df_temp)
       }, error = function(e) return(NULL))
-      
+ 
       if (!is.null(model)) {
         summ <- summary(model)$coefficients
         if ("pathway" %in% rownames(summ)) {
-          res              <- as.data.frame(t(summ["pathway", ]))
-          res$metabolite   <- metabolite
-          res$pathway      <- pathway
+          res            <- as.data.frame(t(summ["pathway", ]))
+          res$metabolite <- metabolite
+          res$pathway    <- pathway
           results_list[[paste(pathway, metabolite, sep = "__")]] <- res
         }
       }
     }
   }
-  
-  final_df              <- do.call(rbind, results_list)
-  colnames(final_df)[1:4] <- c("Estimate", "Std_Error", "t_value", "p_value")
-  final_df$p_adjusted   <- p.adjust(final_df$p_value, method = "fdr")
+ 
+  final_df                 <- do.call(rbind, results_list)
+  colnames(final_df)[1:4]  <- c("Estimate", "Std_Error", "t_value", "p_value")
+  final_df$p_adjusted      <- p.adjust(final_df$p_value, method = "fdr")
   return(final_df)
 }
-
-# --- 2d. Shared helper: p-value to significance stars ---
-get_stars <- function(p) {
-  if (p < 0.001) return("***")
-  if (p < 0.01)  return("**")
-  if (p < 0.05)  return("*")
-  return("ns")
-}
-
-
-
 ```
 
-### 5.3. Run Regressions
-
 ```{r}
-# SA ~ Metabolites and SA ~ Pathways
-results_metabolites <- run_omics_regression(nmr_matched,      master_table, predictor_col = "SA_status")
-results_pathways    <- run_omics_regression(pathway_matched,  master_table, predictor_col = "SA_status")
-
-# Pathway ~ Metabolite
+## Run the three regressions
+ 
+results_metabolites <- run_omics_regression(nmr_matched,     master_table, predictor_col = "SA_status")
+results_pathways    <- run_omics_regression(pathway_matched, master_table, predictor_col = "SA_status")
 results_path_met    <- run_pathway_metabolite_regression(nmr_matched, pathway_matched, master_table)
-
-# Quick diagnostics
-cat("Pathway-Metabolite pairs total:      ", nrow(results_path_met), "\n")
-cat("Significant at p < 0.05:             ", sum(results_path_met$p_value    < 0.05, na.rm = TRUE), "\n")
-cat("Surviving FDR correction (padj<0.05):", sum(results_path_met$p_adjusted < 0.05, na.rm = TRUE), "\n")
-
+ 
 ```
 
-### 5.4. Spearman Validation & High-Confidence Filtering
+### 5.3. Spearman Sensitivity Checks (continuous SA / pathway-metabolite pairs)
+
+Running Spearman's correlations on the whole dataset and then finding overlapping significant features with the linear regressions, to see what is significant in both tests.
+
+This doesn't use the high/low groups like the linear regressions, it works on a continuous scale.
 
 ```{r}
-# --- 4a. SA ~ Metabolites ---
-spearman_met    <- run_spearman_check(nmr_matched,     master_table, predictor_col = "sa_abundance")
-overlap_met     <- merge(results_metabolites, spearman_met, by = "feature")
-high_conf_met   <- overlap_met[overlap_met$p_value < 0.05 & overlap_met$p_spearman < 0.05, ]
-
-# --- 4b. SA ~ Pathways ---
-spearman_path   <- run_spearman_check(pathway_matched, master_table, predictor_col = "sa_abundance")
-overlap_path    <- merge(results_pathways, spearman_path, by = "feature")
-high_conf_path  <- overlap_path[overlap_path$p_value < 0.05 & overlap_path$p_spearman < 0.05, ]
-
-# --- 4c. Pathway ~ Metabolite pairs ---
-fdr_hits             <- results_path_met[results_path_met$p_adjusted < 0.05, ]
-common_ids           <- Reduce(intersect, list(rownames(nmr_matched), rownames(pathway_matched), master_table$NMR_sample_id))
+# SA ~ metabolites
+spearman_met  <- run_spearman_check(nmr_matched, master_table, predictor_col = "sa_abundance")
+overlap_met   <- merge(results_metabolites, spearman_met, by = "feature")
+high_conf_met <- overlap_met[overlap_met$p_value < 0.05 & overlap_met$p_spearman < 0.05, ]
+ 
+# SA ~ pathways
+spearman_path  <- run_spearman_check(pathway_matched, master_table, predictor_col = "sa_abundance")
+overlap_path   <- merge(results_pathways, spearman_path, by = "feature")
+high_conf_path <- overlap_path[overlap_path$p_value < 0.05 & overlap_path$p_spearman < 0.05, ]
+ 
+# Pathway ~ metabolite pairs: only validate pairs surviving FDR correction
+fdr_hits   <- results_path_met[results_path_met$p_adjusted < 0.05, ]
+common_ids <- Reduce(intersect, list(rownames(nmr_matched), rownames(pathway_matched), master_table$NMR_sample_id))
+ 
 spearman_path_met_results <- list()
-
-for (i in 1:nrow(fdr_hits)) {
-  path    <- fdr_hits$pathway[i]
-  met     <- fdr_hits$metabolite[i]
-  x       <- as.numeric(pathway_matched[common_ids, path])
-  y       <- as.numeric(nmr_matched[common_ids, met])
+for (i in seq_len(nrow(fdr_hits))) {
+  path <- fdr_hits$pathway[i]
+  met  <- fdr_hits$metabolite[i]
+ 
+  x <- as.numeric(pathway_matched[common_ids, path])
+  y <- as.numeric(nmr_matched[common_ids, met])
   df_temp <- na.omit(data.frame(x = x, y = y))
-  
+ 
   if (nrow(df_temp) > 5) {
     test <- cor.test(df_temp$x, df_temp$y, method = "spearman", exact = FALSE)
     spearman_path_met_results[[paste(path, met, sep = "__")]] <- data.frame(
@@ -2593,23 +3187,18 @@ for (i in 1:nrow(fdr_hits)) {
     )
   }
 }
-
+ 
 spearman_path_met_df <- do.call(rbind, spearman_path_met_results)
 high_conf_path_met   <- merge(fdr_hits, spearman_path_met_df, by = c("pathway", "metabolite"))
 high_conf_path_met   <- high_conf_path_met[high_conf_path_met$p_spearman < 0.05, ]
 high_conf_path_met   <- high_conf_path_met[order(high_conf_path_met$p_adjusted), ]
 high_conf_path_met$stars <- sapply(high_conf_path_met$p_value, get_stars)
-
-cat("High-confidence pathway-metabolite pairs:", nrow(high_conf_path_met), "\n")
-
 ```
 
-### 5.5. Pathway Name Cleaning
-
 ```{r}
-
- pathway_name_map <- c(
-  #  (SA ~ Pathway) ---
+## Pathway name mapping (PWY identifiers -> readable names)
+ 
+pathway_name_map <- c(
   "ARGININE.SYN4.PWY..L.ornithine.biosynthesis.II"                        = "L-Ornithine Biosynthesis",
   "ASPASN.PWY..superpathway.of.L.aspartate.and.L.asparagine.biosynthesis" = "L-Aspartate & L-Asparagine Biosynthesis",
   "GLYCOGENSYNTH.PWY..glycogen.biosynthesis.I..from.ADP.D.Glucose."       = "Glycogen Biosynthesis",
@@ -2623,8 +3212,6 @@ cat("High-confidence pathway-metabolite pairs:", nrow(high_conf_path_met), "\n")
   "PWY0.1297..superpathway.of.purine.deoxyribonucleosides.degradation"    = "Purine Deoxyribonucleoside Degradation",
   "PWY0.1477..ethanolamine.utilization"                                   = "Ethanolamine Utilisation",
   "PWY66.409..superpathway.of.purine.nucleotide.salvage"                  = "Purine Nucleotide Salvage",
-  
-  # (Pathway ~ Metabolite pairs) ---
   "PWY.5910..superpathway.of.geranylgeranyldiphosphate.biosynthesis.I..via.mevalonate." = "Geranylgeranyl Diphosphate Biosynthesis",
   "PWY.6859..all.trans.farnesol.biosynthesis"                             = "Farnesol Biosynthesis",
   "PWY.922..mevalonate.pathway.I..eukaryotes.and.bacteria."               = "Mevalonate Pathway",
@@ -2644,82 +3231,60 @@ cat("High-confidence pathway-metabolite pairs:", nrow(high_conf_path_met), "\n")
   "UDPNAGSYN.PWY..UDP.N.acetyl.D.glucosamine.biosynthesis.I"               = "UDP-N-Acetylglucosamine Biosynthesis",
   "HSERMETANA.PWY..L.methionine.biosynthesis.III"                          = "L-Methionine Biosynthesis III",
   "TCA.GLYOX.BYPASS..superpathway.of.glyoxylate.bypass.and.TCA"            = "Glyoxylate Bypass & TCA Cycle",
-  "ANAEROFRUCAT.PWY..homolactic.fermentation",
-  "ARGSYNBSUB.PWY..L.arginine.biosynthesis.II..acetyl.cycle." = "L-Arginine Biosynthesis (Acetyl Cycle)",
-  "PWY.4984..urea.cycle",
-  "ANAEROFRUCAT.PWY..homolactic.fermentation" = "Homolactic Fermentation"
+  "ARGSYNBSUB.PWY..L.arginine.biosynthesis.II..acetyl.cycle."              = "L-Arginine Biosynthesis (Acetyl Cycle)",
+  "PWY.4984..urea.cycle"                                                   = "Urea Cycle",
+  "ANAEROFRUCAT.PWY..homolactic.fermentation"                              = "Homolactic Fermentation"
 )
-
-
-# Apply to high confidence pathway results
-# Apply readable names
-high_conf_path_plot <- high_conf_path
-high_conf_path_plot$feature_clean <- ifelse(
-  high_conf_path_plot$feature %in% names(pathway_name_map),
-  pathway_name_map[high_conf_path_plot$feature],
-  gsub("\\.", " ", high_conf_path_plot$feature)
-)
-
-# Check how many we have
-cat("Pathways being plotted:", nrow(high_conf_path_plot), "\n")
-print(high_conf_path_plot$feature_clean)
-
-path_hits_plot <- ggplot(high_conf_path_plot, 
-                          aes(x = Estimate, y = reorder(feature_clean, Estimate), 
-                              fill = Estimate > 0)) +
-  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
-  scale_fill_manual(values = c("#D55E00", "#56B4E9"),
-                    labels = c("Decreased with SA", "Increased with SA"),
-                    name   = "Direction of Change") +
-  labs(title    = "Microbial Pathway Shifts Associated with S. aureus",
-       subtitle = paste0("High-Confidence Pathways (Regression & Spearman p < 0.05) | n=", 
-                         nrow(high_conf_path_plot)),
-       x = "Regression Estimate (Effect Size)", y = NULL) +
-  theme_minimal() +
-  theme(plot.title      = element_text(face = "bold", size = 24),
-        plot.subtitle   = element_text(size = 18, color = "gray30"),
-        axis.text.y     = element_text(size = 18, face = "bold"),
-        axis.text.x     = element_text(size = 16),
-        axis.title.x    = element_text(size = 18, face = "bold"),
-        legend.position = "bottom",
-        legend.title    = element_text(size = 18, face = "bold"),
-        legend.text     = element_text(size = 16),
-        legend.key.size = unit(1.2, "cm"),
-        panel.grid.minor = element_blank(),
-        plot.margin     = margin(t = 10, r = 50, b = 10, l = 50))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Hits.png",
-       path_hits_plot, 
-       width  = 16, 
-       height = 0.5 * nrow(high_conf_path_plot) + 4,  # auto-scales height with n pathways
-       dpi    = 300)
-
-
+ 
+clean_pathway_name <- function(feature) {
+  ifelse(feature %in% names(pathway_name_map),
+         pathway_name_map[feature],
+         gsub("\\.", " ", feature))
+}
 ```
 
-### 5.6. Save All Results
-
 ```{r}
+## Results summary
 
-dir.create("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/", showWarnings = FALSE, recursive = TRUE)
+cat("=== SA ~ METABOLITES (Multivariate Linear Regression) ===\n")
+cat("Total metabolites tested:          ", nrow(results_metabolites), "\n")
+cat("Significant at p < 0.05:           ", sum(results_metabolites$p_value < 0.05, na.rm = TRUE), "\n")
+cat("Surviving FDR (padj < 0.05):       ", sum(results_metabolites$p_adjusted < 0.05, na.rm = TRUE), "\n")
+cat("High-confidence (regression & Spearman p < 0.05):", nrow(high_conf_met), "\n\n")
+ 
+cat("=== SA ~ PATHWAYS (Multivariate Linear Regression) ===\n")
+cat("Total pathways tested:             ", nrow(results_pathways), "\n")
+cat("Significant at p < 0.05:           ", sum(results_pathways$p_value < 0.05, na.rm = TRUE), "\n")
+cat("Surviving FDR (padj < 0.05):       ", sum(results_pathways$p_adjusted < 0.05, na.rm = TRUE), "\n")
+cat("High-confidence (regression & Spearman p < 0.05):", nrow(high_conf_path), "\n\n")
+ 
+cat("=== PATHWAY ~ METABOLITE (Pairwise Regression) ===\n")
+cat("Total pairs tested:                ", nrow(results_path_met), "\n")
+cat("Significant at p < 0.05:           ", sum(results_path_met$p_value < 0.05, na.rm = TRUE), "\n")
+cat("Surviving FDR (padj < 0.05):       ", sum(results_path_met$p_adjusted < 0.05, na.rm = TRUE), "\n")
+cat("High-confidence (FDR & Spearman p < 0.05):", nrow(high_conf_path_met), "\n")
+ 
+## Save result tables
 
-write.csv(results_metabolites,  "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Metabolite_Regressions_Full.csv",          row.names = FALSE)
-write.csv(results_pathways,     "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Regressions_Full.csv",             row.names = FALSE)
-write.csv(results_path_met,     "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Regressions_Full.csv", row.names = FALSE)
-write.csv(high_conf_met,        "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Metabolites_SA.csv",      row.names = FALSE)
-write.csv(high_conf_path,       "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Pathways_SA.csv",         row.names = FALSE)
-write.csv(high_conf_path_met,   "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Pathway_Metabolite_Pairs.csv", row.names = FALSE)
-write.csv(results_metabolites[results_metabolites$p_value < 0.05, ], "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Metabolite_Hits_p05.csv", row.names = FALSE)
-write.csv(results_pathways[results_pathways$p_value < 0.05, ],       "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Hits_p05.csv",    row.names = FALSE)
+write.csv(results_metabolites, paste0(OUT_DIR, "SA_Metabolite_Regressions_Full.csv"),          row.names = FALSE)
+write.csv(results_pathways,    paste0(OUT_DIR, "SA_Pathway_Regressions_Full.csv"),             row.names = FALSE)
+write.csv(results_path_met,    paste0(OUT_DIR, "Pathway_Metabolite_Regressions_Full.csv"),     row.names = FALSE)
+ 
+write.csv(results_metabolites[results_metabolites$p_value < 0.05, ], paste0(OUT_DIR, "SA_Metabolite_Hits_p05.csv"), row.names = FALSE)
+write.csv(results_pathways[results_pathways$p_value < 0.05, ],       paste0(OUT_DIR, "SA_Pathway_Hits_p05.csv"),    row.names = FALSE)
+write.csv(results_path_met[results_path_met$p_value < 0.05, ],       paste0(OUT_DIR, "Pathway_Metabolite_Hits_p05.csv"), row.names = FALSE)
+ 
+write.csv(high_conf_met,      paste0(OUT_DIR, "High_Confidence_Metabolites_SA.csv"),           row.names = FALSE)
+write.csv(high_conf_path,     paste0(OUT_DIR, "High_Confidence_Pathways_SA.csv"),              row.names = FALSE)
+write.csv(high_conf_path_met, paste0(OUT_DIR, "High_Confidence_Pathway_Metabolite_Pairs.csv"), row.names = FALSE)
+ 
 ```
 
-### 5.7. Visualisations
+### 5.4. Visualisations
 
 ```{r}
-library(ggplot2)
-library(stringr)
-
-# --- 7a. Boxplot helper function ---
+## Visualisations
+# --- Boxplot: SA-High vs SA-Low ---
 create_sa_boxplot <- function(df, y_var, title_label) {
   plot_data <- df[!is.na(df$SA_status), ]
   ggplot(plot_data, aes(x = SA_status, y = .data[[y_var]], fill = SA_status)) +
@@ -2735,41 +3300,44 @@ create_sa_boxplot <- function(df, y_var, title_label) {
           axis.text     = element_text(size = 16),
           axis.title    = element_text(size = 16, face = "bold"))
 }
-
-# --- 7b. Prepare plotting data frames ---
-meta_cols     <- master_table[, c("NMR_sample_id", "SA_status", "lesional", "pH_mean")]
-nmr_df        <- as.data.frame(nmr_matched, check.names = FALSE)
-nmr_df$NMR_sample_id  <- rownames(nmr_df)
-plot_master   <- merge(nmr_df, meta_cols, by = "NMR_sample_id")
-
-path_df       <- as.data.frame(pathway_matched, check.names = FALSE)
+ 
+# --- Prepare plotting dataframes ---
+meta_cols <- master_table[, c("NMR_sample_id", "SA_status", "lesional", "pH_mean")]
+ 
+nmr_df <- as.data.frame(nmr_matched, check.names = FALSE)
+nmr_df$NMR_sample_id <- rownames(nmr_df)
+plot_master <- merge(nmr_df, meta_cols, by = "NMR_sample_id")
+ 
+path_df <- as.data.frame(pathway_matched, check.names = FALSE)
 path_df$NMR_sample_id <- rownames(path_df)
 plot_pathways <- merge(path_df, meta_cols, by = "NMR_sample_id")
-
-# --- 7c. Individual boxplots ---
-# Metabolites - use feature name as title (metabolite names are already readable)
+ 
+# --- Individual boxplots: significant metabolites (p < 0.05) ---
 metabolite_hits <- results_metabolites[results_metabolites$p_value < 0.05, ]
 for (met in metabolite_hits$feature) {
   if (met %in% colnames(plot_master)) {
     p <- create_sa_boxplot(plot_master, met, paste("Metabolite:", met))
-    ggsave(paste0("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Metabolite_", met, ".png"),
-           p, width = 6, height = 5, dpi = 300)
+    ggsave(paste0(OUT_DIR, "Metabolite_", met, ".png"), p, width = 6, height = 5, dpi = 300)
   }
 }
-
-# Pathways - use readable name in title and filename
-# Remove the top 5 cap - use all significant pathways
-pathway_hits <- results_pathways[results_pathways$p_value < 0.05 & 
-                                   !is.na(results_pathways$p_value), ]
+ 
+# --- Individual boxplots: significant pathways (p < 0.05), readable names ---
+pathway_hits <- results_pathways[results_pathways$p_value < 0.05 & !is.na(results_pathways$p_value), ]
 pathway_hits$stars         <- sapply(pathway_hits$p_value, get_stars)
-pathway_hits$feature_clean <- ifelse(
-  pathway_hits$feature %in% names(pathway_name_map),
-  pathway_name_map[pathway_hits$feature],
-  gsub("\\.", " ", pathway_hits$feature)
-)
+pathway_hits$feature_clean <- clean_pathway_name(pathway_hits$feature)
 pathway_hits$labeled_feature <- paste0(pathway_hits$feature_clean, " ", pathway_hits$stars)
-
-path_top <- ggplot(pathway_hits, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
+ 
+for (i in seq_len(nrow(pathway_hits))) {
+  path <- pathway_hits$feature[i]
+  if (path %in% colnames(plot_pathways)) {
+    clean_name <- gsub("[^[:alnum:]]", "_", pathway_hits$feature_clean[i])
+    p <- create_sa_boxplot(plot_pathways, path, paste("Pathway:", pathway_hits$feature_clean[i]))
+    ggsave(paste0(OUT_DIR, "Pathway_", clean_name, ".png"), p, width = 8, height = 6, dpi = 300)
+  }
+}
+ 
+# --- Forest plot: all significant pathways ---
+path_significance_plot <- ggplot(pathway_hits, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
   geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error),
                  height = 0.3, linewidth = 1, color = "#009E73") +
@@ -2788,26 +3356,20 @@ path_top <- ggplot(pathway_hits, aes(x = Estimate, y = reorder(labeled_feature, 
         axis.title.x  = element_text(size = 18, face = "bold"),
         panel.grid.minor = element_blank(),
         plot.margin   = margin(t = 10, r = 60, b = 10, l = 80))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathways_Significance.png",
-       path_top, 
-       width  = 14, 
-       height = 0.5 * nrow(pathway_hits) + 3,
-       dpi    = 300)
-                            
-
-# --- 7d. Forest plots - top 5 metabolites and pathways ---
-top_met_df          <- head(metabolite_hits[order(metabolite_hits$p_value), ], 5)
-top_met_df$stars    <- sapply(top_met_df$p_value, get_stars)
+ 
+ggsave(paste0(OUT_DIR, "Pathways_Significance.png"), path_significance_plot,
+       width = 14, height = 0.5 * nrow(pathway_hits) + 3, dpi = 300)
+ 
+# --- Forest plots: top 5 metabolites and top 5 pathways by p-value ---
+top_met_df <- head(metabolite_hits[order(metabolite_hits$p_value), ], 5)
+top_met_df$stars <- sapply(top_met_df$p_value, get_stars)
 top_met_df$labeled_feature <- paste0(top_met_df$feature, " ", top_met_df$stars)
-
-top_path_df         <- head(pathway_hits[order(pathway_hits$p_value), ], 5)
-top_path_df$stars   <- sapply(top_path_df$p_value, get_stars)
-top_path_df$feature_clean <- ifelse(top_path_df$feature %in% names(pathway_name_map),
-                                     pathway_name_map[top_path_df$feature],
-                                     gsub("\\.", " ", top_path_df$feature))
+ 
+top_path_df <- head(pathway_hits[order(pathway_hits$p_value), ], 5)
+top_path_df$stars <- sapply(top_path_df$p_value, get_stars)
+top_path_df$feature_clean <- clean_pathway_name(top_path_df$feature)
 top_path_df$labeled_feature <- paste0(top_path_df$feature_clean, " ", top_path_df$stars)
-
+ 
 meta_top <- ggplot(top_met_df, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
   geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error),
@@ -2823,11 +3385,10 @@ meta_top <- ggplot(top_met_df, aes(x = Estimate, y = reorder(labeled_feature, Es
         axis.title.x  = element_text(size = 18, face = "bold"),
         plot.title    = element_text(face = "bold", size = 22),
         plot.subtitle = element_text(size = 16))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Metabolites_Significance_forest.png",
-       meta_top, width = 10, height = 6, dpi = 300)
-
-path_top <- ggplot(top_path_df, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
+ 
+ggsave(paste0(OUT_DIR, "Metabolites_Significance_forest.png"), meta_top, width = 10, height = 6, dpi = 300)
+ 
+path_top5_plot <- ggplot(top_path_df, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
   geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error),
                  height = 0.3, linewidth = 1, color = "#009E73") +
@@ -2835,7 +3396,7 @@ path_top <- ggplot(top_path_df, aes(x = Estimate, y = reorder(labeled_feature, E
   geom_text(aes(x = Estimate + Std_Error, label = stars),
             hjust = -0.3, vjust = 0.4, size = 8, color = "black", fontface = "bold") +
   scale_y_discrete(labels = function(x) str_wrap(x, width = 35)) +
-  labs(title    = "Microbial Pathway Shifts: High vs Low SA",
+  labs(title    = "Microbial Pathway Shifts: High vs Low SA (Top 5)",
        subtitle = "(* p < 0.05, ** p < 0.01, *** p < 0.001)",
        x = "Regression Estimate (Abundance)", y = NULL) +
   theme_minimal() +
@@ -2846,15 +3407,12 @@ path_top <- ggplot(top_path_df, aes(x = Estimate, y = reorder(labeled_feature, E
         axis.title.x  = element_text(size = 18, face = "bold"),
         panel.grid.minor = element_blank(),
         plot.margin   = margin(t = 10, r = 50, b = 10, l = 80))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathways_Significance_forest.png",
-       path_top, width = 14, height = 7, dpi = 300)
-
-# --- 7e. High-confidence bar plots ---
-high_conf_met$feature <- reorder(high_conf_met$feature, high_conf_met$Estimate)
-
-metab_hits_plot <- ggplot(high_conf_met, 
-                           aes(x = Estimate, y = reorder(feature, Estimate), 
+ 
+ggsave(paste0(OUT_DIR, "Pathways_Significance_forest.png"), path_top5_plot, width = 14, height = 7, dpi = 300)
+ 
+# --- High-confidence bar plot: metabolites ---
+metab_hits_plot <- ggplot(high_conf_met,
+                           aes(x = Estimate, y = reorder(feature, Estimate),
                                fill = Estimate > 0)) +
   geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
   scale_fill_manual(values = c("#D55E00", "#56B4E9"),
@@ -2874,27 +3432,23 @@ metab_hits_plot <- ggplot(high_conf_met,
         legend.text     = element_text(size = 16),
         legend.key.size = unit(1.2, "cm"),
         plot.margin     = margin(10, 20, 10, 20))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Metabolite_Hits_Final.png",
-       metab_hits_plot, width = 12, height = 9, dpi = 300)
-
-# Apply readable names to high_conf_path_plot
+ 
+ggsave(paste0(OUT_DIR, "SA_Metabolite_Hits_Final.png"), metab_hits_plot, width = 12, height = 9, dpi = 300)
+ 
+# --- High-confidence bar plot: pathways ---
 high_conf_path_plot <- high_conf_path[!is.na(high_conf_path$feature), ]
-high_conf_path_plot$feature_clean <- ifelse(
-  high_conf_path_plot$feature %in% names(pathway_name_map),
-  pathway_name_map[high_conf_path_plot$feature],
-  gsub("\\.", " ", high_conf_path_plot$feature)
-)
-
-path_hits_plot <- ggplot(high_conf_path_plot, 
-                          aes(x = Estimate, y = reorder(feature_clean, Estimate), 
+high_conf_path_plot$feature_clean <- clean_pathway_name(high_conf_path_plot$feature)
+ 
+path_hits_plot <- ggplot(high_conf_path_plot,
+                          aes(x = Estimate, y = reorder(feature_clean, Estimate),
                               fill = Estimate > 0)) +
   geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
   scale_fill_manual(values = c("#D55E00", "#56B4E9"),
                     labels = c("Decreased with SA", "Increased with SA"),
                     name   = "Direction of Change") +
   labs(title    = "Microbial Pathway Shifts Associated with S. aureus",
-       subtitle = "High-Confidence Pathways (Regression & Spearman p < 0.05)",
+       subtitle = paste0("High-Confidence Pathways (Regression & Spearman p < 0.05) | n=",
+                          nrow(high_conf_path_plot)),
        x = "Regression Estimate (Effect Size)", y = NULL) +
   theme_minimal() +
   theme(plot.title      = element_text(face = "bold", size = 24),
@@ -2908,39 +3462,30 @@ path_hits_plot <- ggplot(high_conf_path_plot,
         legend.key.size = unit(1.2, "cm"),
         panel.grid.minor = element_blank(),
         plot.margin     = margin(t = 10, r = 50, b = 10, l = 50))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Hits.png",
-       path_hits_plot, width = 16, height = 12, dpi = 300)
-
-# --- 7f. Pathway-Metabolite Heatmap ---
-
-# Filter to top 20 pathways by FDR
+ 
+ggsave(paste0(OUT_DIR, "SA_Pathway_Hits.png"), path_hits_plot,
+       width = 16, height = 0.5 * nrow(high_conf_path_plot) + 4, dpi = 300)
+ 
+# --- Pathway-Metabolite heatmap (top 20 pathways by FDR) ---
 top_pathways_heatmap <- high_conf_path_met %>%
   group_by(pathway) %>%
   summarise(best_p = min(p_adjusted)) %>%
   arrange(best_p) %>%
   slice_head(n = 20) %>%
   pull(pathway)
-
+ 
 heatmap_filtered <- high_conf_path_met[high_conf_path_met$pathway %in% top_pathways_heatmap, ]
-
-# Apply readable names from pathway_name_map (not the old regex stripping)
-heatmap_filtered$pathway_clean <- ifelse(
-  heatmap_filtered$pathway %in% names(pathway_name_map),
-  pathway_name_map[heatmap_filtered$pathway],
-  gsub("\\.", " ", heatmap_filtered$pathway)   # fallback only if not in map
-)
-
+heatmap_filtered$pathway_clean <- clean_pathway_name(heatmap_filtered$pathway)
+ 
 max_abs <- max(abs(heatmap_filtered$Estimate), na.rm = TRUE)
-
-heatmap_plot <- ggplot(heatmap_filtered,
-                        aes(x = metabolite, y = pathway_clean, fill = Estimate)) +
+ 
+heatmap_plot <- ggplot(heatmap_filtered, aes(x = metabolite, y = pathway_clean, fill = Estimate)) +
   geom_tile(color = "white", linewidth = 0.5) +
   geom_text(aes(label = stars), size = 6, color = "white", fontface = "bold") +
   scale_fill_gradient2(low = "#D55E00", mid = "white", high = "#56B4E9",
-                       midpoint = 0, limits = c(-max_abs, max_abs),
-                       name = "Regression\nEstimate") +
-  labs(title    = "Microbial Pathway → Metabolite Associations",
+                        midpoint = 0, limits = c(-max_abs, max_abs),
+                        name = "Regression\nEstimate") +
+  labs(title    = "Microbial Pathway -> Metabolite Associations",
        subtitle = "Top 20 Pathways by FDR | * p<0.05  ** p<0.01  *** p<0.001",
        x = "Metabolite", y = NULL) +
   theme_minimal() +
@@ -2953,34 +3498,25 @@ heatmap_plot <- ggplot(heatmap_filtered,
         legend.text   = element_text(size = 14),
         panel.grid    = element_blank(),
         plot.margin   = margin(t = 10, r = 30, b = 20, l = 10))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Heatmap_Top20.png",
-       heatmap_plot, width = 18, height = 12, dpi = 300)
-
-
-
-# --- 7g. Top 20 Pathway-Metabolite Pairs Bar Plot ---
+ 
+ggsave(paste0(OUT_DIR, "Pathway_Metabolite_Heatmap_Top20.png"), heatmap_plot, width = 18, height = 12, dpi = 300)
+ 
+# --- Top 20 pathway-metabolite pairs bar plot ---
 top20 <- head(high_conf_path_met[order(high_conf_path_met$p_adjusted), ], 20)
-
-# Use readable pathway names in pair labels
-top20$pathway_readable <- ifelse(
-  top20$pathway %in% names(pathway_name_map),
-  pathway_name_map[top20$pathway],
-  gsub("\\.", " ", top20$pathway)
-)
+top20$pathway_readable <- clean_pathway_name(top20$pathway)
 top20$pair_label <- paste0(
   str_trunc(top20$pathway_readable, 40),
-  "  →  ",
+  "  ->  ",
   top20$metabolite,
   "  ", top20$stars
 )
-
-pair_plot <- ggplot(top20, aes(x = Estimate, y = reorder(pair_label, Estimate), 
+ 
+pair_plot <- ggplot(top20, aes(x = Estimate, y = reorder(pair_label, Estimate),
                                 fill = Estimate > 0)) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
   geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
   scale_fill_manual(values = c("#D55E00", "#56B4E9"),
-                    labels = c("Decreased with Pathway Activity", 
+                    labels = c("Decreased with Pathway Activity",
                                "Increased with Pathway Activity"),
                     name   = "Direction of Change") +
   labs(title    = "Top 20 Pathway-Metabolite Associations",
@@ -2997,719 +3533,9 @@ pair_plot <- ggplot(top20, aes(x = Estimate, y = reorder(pair_label, Estimate),
         legend.text     = element_text(size = 14),
         legend.key.size = unit(1.2, "cm"),
         plot.margin     = margin(t = 10, r = 30, b = 10, l = 10))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Top20.png",
-       pair_plot, width = 18, height = 11, dpi = 300)
-```
-
-```{r}
-# Creating the High/Low status based on thresholds
-master_table <- master_table %>%
-  mutate(SA_status = case_when(
-    sa_abundance > 35 ~ "High",
-    sa_abundance < 10 ~ "Low",
-    TRUE ~ NA_character_  # Samples in the 10-35% range become NA
-  ))
-
-# Set 'Low' as the reference for the regression
-master_table$SA_status <- factor(master_table$SA_status, levels = c("Low", "High"))
-
-# Count the samples in each SA_status group, including NAs
-table(master_table$SA_status, useNA = "always")
-
-# Step 1 - run regressions
-results_pathways <- run_omics_regression(pathway_matched, master_table, predictor_col = "SA_status")
-
-# Step 2 - run spearman
-spearman_path <- run_spearman_check(pathway_matched, master_table, predictor_col = "sa_abundance")
-
-# Step 3 - merge and filter to high confidence
-overlap_path <- merge(results_pathways, spearman_path, by = "feature")
-high_conf_path <- overlap_path[overlap_path$p_value < 0.05 & overlap_path$p_spearman < 0.05, ]
-
-# Now check the names
-sort(unique(high_conf_path$feature))
-```
-
-Label the pathways to be more readable and understandable
-
-```{r}
-pathway_name_map <- c(
-  "ARGININE.SYN4.PWY..L.ornithine.biosynthesis.II"                        = "L-Ornithine Biosynthesis",
-  "ASPASN.PWY..superpathway.of.L.aspartate.and.L.asparagine.biosynthesis" = "L-Aspartate & L-Asparagine Biosynthesis",
-  "GLYCOGENSYNTH.PWY..glycogen.biosynthesis.I..from.ADP.D.Glucose."       = "Glycogen Biosynthesis",
-  "HEME.BIOSYNTHESIS.II.1..heme.b.biosynthesis.V..aerobic."               = "Heme Biosynthesis (Aerobic)",
-  "P161.PWY..acetylene.degradation..anaerobic."                           = "Anaerobic Acetylene Degradation",
-  "PWY.1269..CMP.3.deoxy.D.manno.octulosonate.biosynthesis"               = "CMP-Kdo Biosynthesis",
-  "PWY.5136..fatty.acid..beta..oxidation.II..plant.peroxisome."           = "Fatty Acid Beta-Oxidation",
-  "PWY.6292..superpathway.of.L.cysteine.biosynthesis..mammalian."         = "L-Cysteine Biosynthesis",
-  "PWY.8182..valproate..beta..oxidation"                                  = "Valproate Beta-Oxidation",
-  "PWY0.1296..purine.ribonucleosides.degradation"                         = "Purine Ribonucleoside Degradation",
-  "PWY0.1297..superpathway.of.purine.deoxyribonucleosides.degradation"    = "Purine Deoxyribonucleoside Degradation",
-  "PWY0.1477..ethanolamine.utilization"                                   = "Ethanolamine Utilisation",
-  "PWY66.409..superpathway.of.purine.nucleotide.salvage"                  = "Purine Nucleotide Salvage"
-)
-
-# Apply mapping
-high_conf_path_plot <- high_conf_path[!is.na(high_conf_path$feature), ]
-high_conf_path_plot$feature_clean <- ifelse(
-  high_conf_path_plot$feature %in% names(pathway_name_map),
-  pathway_name_map[high_conf_path_plot$feature],
-  gsub("\\.", " ", high_conf_path_plot$feature)  # fallback for any unmapped names
-)
-
-# Verify all mapped correctly
-table(high_conf_path_plot$feature_clean)
-
-```
-
-```{r}
-# =============================================================================
-# RESULTS SUMMARY
-# =============================================================================
-
-cat("=== SA ~ METABOLITES (Multivariate Linear Regression) ===\n")
-cat("Total metabolites tested:          ", nrow(results_metabolites), "\n")
-cat("Significant at p < 0.05:           ", sum(results_metabolites$p_value < 0.05, na.rm = TRUE), "\n")
-cat("Surviving FDR (padj < 0.05):       ", sum(results_metabolites$p_adjusted < 0.05, na.rm = TRUE), "\n")
-cat("High-confidence (regression & Spearman p < 0.05):", nrow(high_conf_met), "\n\n")
-
-cat("=== SA ~ PATHWAYS (Multivariate Linear Regression) ===\n")
-cat("Total pathways tested:             ", nrow(results_pathways), "\n")
-cat("Significant at p < 0.05:           ", sum(results_pathways$p_value < 0.05, na.rm = TRUE), "\n")
-cat("Surviving FDR (padj < 0.05):       ", sum(results_pathways$p_adjusted < 0.05, na.rm = TRUE), "\n")
-cat("High-confidence (regression & Spearman p < 0.05):", nrow(high_conf_path), "\n\n")
-
-cat("=== PATHWAY ~ METABOLITE (Pairwise Regression) ===\n")
-cat("Total pairs tested:                ", nrow(results_path_met), "\n")
-cat("Significant at p < 0.05:           ", sum(results_path_met$p_value < 0.05, na.rm = TRUE), "\n")
-cat("Surviving FDR (padj < 0.05):       ", sum(results_path_met$p_adjusted < 0.05, na.rm = TRUE), "\n")
-cat("High-confidence (FDR & Spearman p < 0.05):", nrow(high_conf_path_met), "\n")
-```
-
-### 5.1. Linear Regressions
-
-```{r}
-
-# --- 1. Define the Master Regression Function ---
-# This function automates: Data matching, Linear Modeling, and FDR Correction
-# Mutlivariate linear regression: outcome ~ SA_status + lesional + pH
-run_omics_regression <- function(data_matrix, master_df, predictor_col = "SA_status") {
-  
-  results_list <- list()
-  common_ids <- intersect(rownames(data_matrix), master_df$NMR_sample_id)
-  
-  # Filter master_df to only include matching IDs once to speed up match()
-  master_sub <- master_df[master_df$NMR_sample_id %in% common_ids, ]
-
-  for(feature in colnames(data_matrix)) {
-    
-    # 1. Prepare Data
-    # Match the order of master_sub to the order of common_ids (rownames of matrix)
-    idx <- match(common_ids, master_sub$NMR_sample_id)
-    
-    df_temp <- data.frame(
-      outcome   = as.numeric(as.character(data_matrix[common_ids, feature])),
-      SA_group  = as.factor(master_sub[[predictor_col]][idx]),
-      lesional  = as.factor(master_sub$lesional[idx]),
-      pH        = as.numeric(as.character(master_sub$pH[idx]))
-    )
-    
-    # 2. Clean Data
-    df_temp <- na.omit(df_temp)
-    
-    # Need at least one sample in each group to run regression!
-    if(length(unique(df_temp$SA_group)) < 2 || nrow(df_temp) < 5) next
-
-    # 3. Run Model
-    model <- tryCatch({
-      lm(outcome ~ SA_group + lesional + pH, data = df_temp)
-    }, error = function(e) return(NULL))
-    
-    # 4. Extract "High" vs "Low"
-    if(!is.null(model)) {
-      summ <- summary(model)$coefficients
-      # Because SA_group is the variable, the row is ALWAYS "SA_groupHigh"
-      if("SA_groupHigh" %in% rownames(summ)) {
-        res <- as.data.frame(t(summ["SA_groupHigh", ]))
-        res$feature <- feature
-        results_list[[feature]] <- res
-      }
-    }
-  }
-  
-  if(length(results_list) == 0) stop("No significant coefficients found. Check group sizes!")
-  
-  final_df <- do.call(rbind, results_list)
-  colnames(final_df) <- c("Estimate", "Std_Error", "t_value", "p_value", "feature")
-  final_df$p_adjusted <- p.adjust(final_df$p_value, method = "fdr")
-  return(final_df)
-}
-
-# 1. Run the SA-Metabolite Regressions
-results_metabolites <- run_omics_regression(nmr_matched, master_table, predictor_col="SA_status")
-
-# 2. Run the SA-Pathway Regressions
-results_pathways <- run_omics_regression(pathway_matched, master_table, predictor_col="SA_status")
-
-# --- 4. Quick View of Top Hits ---
-print("Top SA-Associated Metabolites:")
-head(results_metabolites[results_metabolites$p_value < 0.05, ])
-
-print("Top SA-Associated Pathways:")
-head(results_pathways[results_pathways$p_value < 0.05, ])
-
-# --- Save Metabolite Results ---
-dir.create("~/Desktop/Research_Project/Scripts/SA_Regressions/", 
-           showWarnings = FALSE, recursive = TRUE)
-dir.create("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/", 
-           showWarnings = FALSE, recursive = TRUE)
-write.csv(results_metabolites, 
-          "~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Metabolite_Regressions_Full.csv", row.names = FALSE)
-
-# Save just significant hits (p < 0.05)
-metabolite_hits <- results_metabolites[results_metabolites$p_value < 0.05, ]
-write.csv(metabolite_hits, 
-          "~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Metabolite_Hits_p05.csv", row.names = FALSE)
-
-# --- Save Pathway Results ---
-write.csv(results_pathways, 
-          "~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Pathway_Regressions_Full.csv", row.names = FALSE)
-
-# Save significant hits (p < 0.05)
-pathway_hits <- results_pathways[results_pathways$p_value < 0.05, ]
-write.csv(pathway_hits, 
-          "~/Desktop/Research_Project/Scripts/SA_Regressions/SA_Pathway_Hits_p05.csv", row.names = FALSE)
-
-
-# --- Pathway → Metabolite Regressions ---
-# Model: Metabolite ~ Microbial_Pathway + pH + Lesionality
-# For each pathway, test its association with each metabolite
-
-run_pathway_metabolite_regression <- function(nmr_matrix, pathway_matrix, master_df) {
-  
-  results_list <- list()
-  
-  # Common IDs across all three data sources
-  common_ids <- Reduce(intersect, list(
-    rownames(nmr_matrix),
-    rownames(pathway_matrix),
-    master_df$NMR_sample_id
-  ))
-  
-  master_sub <- master_df[master_df$NMR_sample_id %in% common_ids, ]
-  idx <- match(common_ids, master_sub$NMR_sample_id)
-  
-  # Pull covariates once (same for every model)
-  lesional_vec <- as.factor(master_sub$lesional[idx])
-  pH_vec       <- as.numeric(as.character(master_sub$pH[idx]))
-  
-  for(pathway in colnames(pathway_matrix)) {
-    
-    pathway_vec <- as.numeric(as.character(pathway_matrix[common_ids, pathway]))
-    
-    for(metabolite in colnames(nmr_matrix)) {
-      
-      metabolite_vec <- as.numeric(as.character(nmr_matrix[common_ids, metabolite]))
-      
-      df_temp <- na.omit(data.frame(
-        outcome  = metabolite_vec,
-        pathway  = pathway_vec,
-        lesional = lesional_vec,
-        pH       = pH_vec
-      ))
-      
-      if(nrow(df_temp) < 5) next
-      
-      model <- tryCatch({
-        lm(outcome ~ pathway + lesional + pH, data = df_temp)
-      }, error = function(e) return(NULL))
-      
-      if(!is.null(model)) {
-        summ <- summary(model)$coefficients
-        if("pathway" %in% rownames(summ)) {
-          res <- as.data.frame(t(summ["pathway", ]))
-          res$metabolite <- metabolite
-          res$pathway    <- pathway
-          results_list[[paste(pathway, metabolite, sep = "__")]] <- res
-        }
-      }
-    }
-  }
-  
-  final_df <- do.call(rbind, results_list)
-  colnames(final_df)[1:4] <- c("Estimate", "Std_Error", "t_value", "p_value")
-  final_df$p_adjusted <- p.adjust(final_df$p_value, method = "fdr")
-  return(final_df)
-}
-
-# Run it
-results_path_met <- run_pathway_metabolite_regression(nmr_matched, pathway_matched, master_table)
-
-# View top hits
-head(results_path_met[results_path_met$p_value < 0.05, 
-                       c("pathway", "metabolite", "Estimate", "p_value", "p_adjusted")])
-
-# Save full results
-write.csv(results_path_met,
-          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Regressions_Full.csv",
-          row.names = FALSE)
-
-# Save significant hits only
-path_met_hits <- results_path_met[results_path_met$p_value < 0.05, ]
-write.csv(path_met_hits,
-          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Hits_p05.csv",
-          row.names = FALSE)
-
-# 1. Did it actually produce results?
-nrow(results_path_met)
-
-# 2. Any fully empty rows?
-sum(is.na(results_path_met$Estimate))
-
-# 3. How many significant hits?
-sum(results_path_met$p_value < 0.05, na.rm = TRUE)
-
-# 4. Any hits surviving FDR correction?
-sum(results_path_met$p_adjusted < 0.05, na.rm = TRUE)
-
-# 5. Preview top hits sorted by p-value
-head(results_path_met[order(results_path_met$p_value), 
-                       c("pathway", "metabolite", "Estimate", "p_value", "p_adjusted")])
-
-
-# Check how many NAs are in each matrix
-cat("NAs in nmr_matched:", sum(is.na(suppressWarnings(apply(nmr_matched, 2, as.numeric)))), "\n")
-cat("NAs in pathway_matched:", sum(is.na(suppressWarnings(apply(pathway_matched, 2, as.numeric)))), "\n")
-
-
-```
-
-```{r}
-# --- 1. Define the Helper Function ---
-create_sa_boxplot <- function(df, y_var, title_label) {
-  # Remove NAs in the grouping variable so they don't show up in the plot
-  plot_data <- df[!is.na(df$SA_status), ]
-  
-  ggplot(plot_data, aes(x = SA_status, y = .data[[y_var]], fill = SA_status)) +
-    geom_boxplot(outlier.shape = NA, alpha = 0.7) +
-    geom_jitter(width = 0.2, size = 2, alpha = 0.6) +
-    scale_fill_manual(values = c("Low" = "#56B4E9", "High" = "#D55E00")) +
-    labs(title = title_label, 
-         subtitle = "Comparison of SA-High vs SA-Low",
-         x = "S. aureus Status", 
-         y = "Relative Abundance") +
-    theme_minimal() +
-    theme(legend.position = "none",
-          plot.title = element_text(face = "bold", size = 14))
-}
-
-# --- 2. Prepare Unique Data Frames for Plotting ---
-# Extract metadata columns we need to avoid "duplicate column" errors
-meta_cols <- master_table[, c("NMR_sample_id", "SA_status", "lesional", "pH_mean")]
-
-# Prepare Metabolite Data
-nmr_df <- as.data.frame(nmr_matched, check.names = FALSE)
-nmr_df$NMR_sample_id <- rownames(nmr_df)
-plot_master <- merge(nmr_df, meta_cols, by = "NMR_sample_id")
-
-# Prepare Pathway Data
-path_df <- as.data.frame(pathway_matched, check.names = FALSE)
-path_df$NMR_sample_id <- rownames(path_df)
-plot_pathways <- merge(path_df, meta_cols, by = "NMR_sample_id")
-
-# --- 3. Generate and Save Metabolite Plots ---
-for(met in metabolite_hits$feature) {
-  # Check if the feature actually exists in the plotting data
-  if(met %in% colnames(plot_master)) {
-    p <- create_sa_boxplot(plot_master, met, paste("Metabolite:", met))
-    
-    ggsave(filename = paste0("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Metabolite_", met, ".png"), 
-           plot = p, width = 6, height = 5, dpi = 300)
-  }
-}
-
-# --- 4. Generate and Save Top 5 Pathway Plots ---
-# Sort by p-value to get the most significant ones
-top_pathways <- pathway_hits[order(pathway_hits$p_value), ]
-top_5_names <- head(top_pathways$feature, 5)
-
-for(path in top_5_names) {
-  if(path %in% colnames(plot_pathways)) {
-    # Clean the filename for saving (remove slashes/special chars)
-    clean_name <- gsub("[^[:alnum:]]", "_", substr(path, 1, 30))
-    
-    p <- create_sa_boxplot(plot_pathways, path, "Pathway Abundance") +
-         labs(subtitle = path)
-    
-    ggsave(filename = paste0("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_", clean_name, ".png"), 
-           plot = p, width = 8, height = 6, dpi = 300)
-  }
-}
-
-# 1. Grab Top 5 Metabolites (sorted by p-value)
-top_met_df <- metabolite_hits[order(metabolite_hits$p_value), ]
-top_met_df <- head(top_met_df, 5)
-top_met_df$type <- "Metabolite"
-
-# 2. Grab Top 5 Pathways (sorted by p-value)
-top_path_df <- pathway_hits[order(pathway_hits$p_value), ]
-top_path_df <- head(top_path_df, 5)
-top_path_df$type <- "Pathway"
-
-# 3. Combine them
-plot_summary <- rbind(top_met_df, top_path_df)
-
-# Shorten long pathway names so they fit on the graph
-plot_summary$feature_short <- substr(plot_summary$feature, 1, 40)
-
-
-
-library(stringr) # Needed for wrapping text
-# Function to convert p-value to stars
-get_stars <- function(p) {
-  if (p < 0.001) return("***")
-  if (p < 0.01)  return("**")
-  if (p < 0.05)  return("*")
-  return("ns")
-}
-
-# Apply to your summary data
-plot_summary$stars <- sapply(plot_summary$p_value, get_stars)
-
-# Create a combined label for the Y-axis (e.g., "Glycerol ***")
-plot_summary$labeled_feature <- paste0(plot_summary$feature, " ", plot_summary$stars)
-
-# Filter for top metabolites
-plot_met <- plot_summary[plot_summary$type == "Metabolite", ]
-
-meta_top <- ggplot(plot_met, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error), 
-                 height = 0.3, linewidth = 1, color = "#D55E00") + 
-  geom_point(size = 5, color = "#D55E00") + 
-  # Add stars next to the points
-  geom_text(aes(label = stars), hjust = -0.5, vjust = -0.5, size = 6, color = "black") +
-  labs(title = "Metabolic Shifts: High vs Low SA",
-       subtitle = "(* p < 0.05, ** p < 0.01, *** p < 0.001)",
-       x = "Regression Estimate (NMR Intensity)",
-       y = NULL) +
-  theme_minimal() +
-  theme(axis.text.y = element_text(size = 14, face = "bold"),
-        plot.title = element_text(face = "bold", size = 18))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Metabolites_Significance.png", meta_top, width = 7, height = 4)
-
-
-# 1. Filter for pathways only
-plot_path <- plot_summary[plot_summary$type == "Pathway", ]
-
-# 2. Clean dots to spaces for better wrapping
-plot_path$feature_clean <- gsub("\\.", " ", plot_path$feature)
-
-# 3. Create the Plot
-ggplot(plot_path, aes(x = Estimate, y = reorder(feature_clean, Estimate))) +
-  # Reference line at zero
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
-  # Error bars (Estimate +/- Std_Error)
-  geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error), 
-                 height = 0.3, linewidth = 1, color = "#009E73") + 
-  # Mean points
-  geom_point(size = 5, color = "#009E73") + 
-  # --- ADD STARS ON ERROR BARS ---
-  # hjust = -0.5 pushes it slightly to the right of the error bar end
-  geom_text(aes(x = Estimate + Std_Error, label = stars), 
-            hjust = -0.3, vjust = 0.4, size = 6, color = "black", fontface = "bold") +
-  # -------------------------------
-  # Wrap the long pathway names
-  scale_y_discrete(labels = function(x) str_wrap(x, width = 35)) +
-  labs(title = "Microbial Pathway Shifts: High vs Low SA",
-       subtitle = paste("Significance levels:", "(* p < 0.05, ** p < 0.01, *** p < 0.001)"),
-       x = "Regression Estimate (Abundance)",
-       y = NULL) +
-  theme_minimal() +
-  theme(
-    plot.title = element_text(face = "bold", size = 18),
-    plot.subtitle = element_text(size = 14, color = "gray30"),
-    axis.text.y = element_text(size = 11, face = "bold", lineheight = 0.8),
-    axis.text.x = element_text(size = 12),
-    axis.title.x = element_text(size = 14, vjust = -0.5),
-    panel.grid.minor = element_blank(),
-    # Increase left margin to accommodate the wrapped names
-    plot.margin = margin(t = 10, r = 50, b = 10, l = 80) 
-  )
-
-# 4. Save the high-res image
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathways_Significance.png", 
-       width = 12, height = 6, dpi = 300)
-```
-
-### 5.2. Spearman's Correlations
-
-Running Spearman's correlations on the whole dataset and then finding overlapping significant features with the linear regressions, to see what is significant in both tests.
-
-This doesn't use the high/low groups like the linear regressions, it works on a continuous scale
-
-```{r}
-# --- 1. Define the Spearman Function (Updated) ---
-run_spearman_check <- function(data_matrix, master_df, predictor_col = "sa_abundance") {
-  results_list <- list()
-  
-  # Ensure we only use IDs that exist in both datasets
-  common_ids <- intersect(rownames(data_matrix), master_df$NMR_sample_id)
-  
-  for(feature in colnames(data_matrix)) {
-    # Match and clean data
-    val_outcome <- as.numeric(as.character(data_matrix[common_ids, feature]))
-    val_predictor <- as.numeric(as.character(master_df[[predictor_col]][match(common_ids, master_df$NMR_sample_id)]))
-    
-    # Create a temporary DF to remove NAs safely
-    df_temp <- na.omit(data.frame(x = val_predictor, y = val_outcome))
-    
-    # Only run if we have enough data points (Spearman needs at least 3-5)
-    if(nrow(df_temp) > 5) {
-      test <- cor.test(df_temp$x, df_temp$y, method = "spearman", exact = FALSE)
-      
-      results_list[[feature]] <- data.frame(
-        feature = feature,
-        rho = as.numeric(test$estimate),
-        p_spearman = as.numeric(test$p.value)
-      )
-    }
-  }
-  return(do.call(rbind, results_list))
-}
-
-# --- 2. Run and Compare Metabolites ---
-# Note: Use "sa_abundance" here (the raw % values)
-spearman_met <- run_spearman_check(nmr_matched, master_table, predictor_col = "sa_abundance")
-overlap_met <- merge(results_metabolites, spearman_met, by = "feature")
-
-# High-Confidence: Significant in Linear Regression AND Spearman
-high_conf_met <- overlap_met[overlap_met$p_value < 0.05 & overlap_met$p_spearman < 0.05, ]
-
-# --- 3. Run and Compare Pathways ---
-spearman_path <- run_spearman_check(pathway_matched, master_table, predictor_col = "sa_abundance")
-overlap_path <- merge(results_pathways, spearman_path, by = "feature")
-
-high_conf_path <- overlap_path[overlap_path$p_value < 0.05 & overlap_path$p_spearman < 0.05, ]
-
-# --- 4. View the High-Confidence List ---
-print("--- HIGH-CONFIDENCE METABOLITES ---")
-print(high_conf_met[, c("feature", "Estimate", "rho", "p_value", "p_spearman")])
-
-print("--- HIGH-CONFIDENCE PATHWAYS ---")
-print(head(high_conf_path[order(high_conf_path$p_value), c("feature", "Estimate", "rho", "p_value", "p_spearman")], 10))
-
-# --- Save High-Confidence Metabolites ---
-write.csv(high_conf_met, 
-          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Metabolites_SA.csv", row.names = FALSE)
-
-# --- Save High-Confidence Pathways ---
-write.csv(high_conf_path, 
-          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Pathways_SA.csv", row.names = FALSE)
-
-
-# ------- Visualisations----------
-# Reorder features by their Estimate for a cleaner look
-high_conf_met$feature <- reorder(high_conf_met$feature, high_conf_met$Estimate)
-
-high_conf_path_plot <- high_conf_path[!is.na(high_conf_path$feature), ]
-high_conf_path_plot$feature_clean <- gsub("\\.", " ", high_conf_path_plot$feature)
-
-
-# High confidence metabolites bar plot
-metab_hits <- ggplot(high_conf_met, aes(x = Estimate, y = reorder(feature, Estimate), fill = Estimate > 0)) +
-  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
-  scale_fill_manual(values = c("#D55E00", "#56B4E9"), 
-                    labels = c("Decreased with SA", "Increased with SA"),
-                    name = "Direction of Change") +
-  labs(title = "Metabolites Associated with S. aureus",
-       subtitle = "High-Confidence Hits (Regression & Spearman p < 0.05)",
-       x = "Regression Estimate (Effect Size)", 
-       y = NULL) +
-  theme_minimal() +
-  theme(plot.title    = element_text(face = "bold", size = 22),
-        plot.subtitle = element_text(size = 16),
-        axis.text.y   = element_text(size = 16, face = "bold"),
-        axis.text.x   = element_text(size = 14),
-        axis.title.x  = element_text(size = 16),
-        legend.position = "bottom",
-        legend.title  = element_text(size = 16, face = "bold"),
-        legend.text   = element_text(size = 14),
-        legend.key.size = unit(1, "cm"),
-        plot.margin   = margin(10, 20, 10, 20))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Metabolite_Hits_Final.png", 
-       width = 11, height = 8, dpi = 300)
-
-# High confidence pathways bar plot
-ggplot(high_conf_path_plot, aes(x = Estimate, y = reorder(feature_clean, Estimate), fill = Estimate > 0)) +
-  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
-  scale_y_discrete(labels = function(x) str_wrap(x, width = 40)) +
-  scale_fill_manual(values = c("#D55E00", "#56B4E9"), 
-                    labels = c("Decreased with SA", "Increased with SA"),
-                    name = "Direction of Change") +
-  labs(title = "Microbial Pathway Shifts Associated with S. aureus",
-       subtitle = "High-Confidence Pathways (Significant in both Regression & Spearman, p<0.05)",
-       x = "Regression Estimate (Effect Size)", 
-       y = NULL) +
-  theme_minimal() +
-  theme(plot.title    = element_text(face = "bold", size = 22),
-        plot.subtitle = element_text(size = 16, color = "gray30"),
-        axis.text.y   = element_text(size = 14, face = "bold", lineheight = 0.8),
-        axis.text.x   = element_text(size = 14),
-        axis.title.x  = element_text(size = 16),
-        legend.position = "bottom",
-        legend.title  = element_text(size = 16, face = "bold"),
-        legend.text   = element_text(size = 14),
-        legend.key.size = unit(1.2, "cm"),
-        panel.grid.minor = element_blank(),
-        plot.margin   = margin(t = 10, r = 50, b = 10, l = 50))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/SA_Pathway_Hits.png", 
-       width = 16, height = 12, dpi = 300)
-
-# 1. Prepare Data: Filter out NAs and clean names
-
-
-
-
-
-# --- Spearman Validation for Pathway-Metabolite Pairs ---
-spearman_path_met_results <- list()
-
-common_ids <- Reduce(intersect, list(
-  rownames(nmr_matched),
-  rownames(pathway_matched),
-  master_table$NMR_sample_id
-))
-
-# Only validate pairs that passed FDR correction to save time
-fdr_hits <- results_path_met[results_path_met$p_adjusted < 0.05, ]
-
-for(i in 1:nrow(fdr_hits)) {
-  path <- fdr_hits$pathway[i]
-  met  <- fdr_hits$metabolite[i]
-  
-  x <- as.numeric(pathway_matched[common_ids, path])
-  y <- as.numeric(nmr_matched[common_ids, met])
-  
-  df_temp <- na.omit(data.frame(x = x, y = y))
-  
-  if(nrow(df_temp) > 5) {
-    test <- cor.test(df_temp$x, df_temp$y, method = "spearman", exact = FALSE)
-    spearman_path_met_results[[paste(path, met, sep = "__")]] <- data.frame(
-      pathway     = path,
-      metabolite  = met,
-      rho         = as.numeric(test$estimate),
-      p_spearman  = as.numeric(test$p.value)
-    )
-  }
-}
-
-spearman_path_met_df <- do.call(rbind, spearman_path_met_results)
-
-# --- Merge and Filter High-Confidence Pairs ---
-high_conf_path_met <- merge(fdr_hits, spearman_path_met_df, by = c("pathway", "metabolite"))
-high_conf_path_met <- high_conf_path_met[high_conf_path_met$p_spearman < 0.05, ]
-
-# Sort by FDR p-value
-high_conf_path_met <- high_conf_path_met[order(high_conf_path_met$p_adjusted), ]
-
-nrow(high_conf_path_met) # How many pairs survived both tests?
-head(high_conf_path_met[, c("pathway", "metabolite", "Estimate", "rho", "p_value", "p_adjusted", "p_spearman")], 10)
-
-# Save
-write.csv(high_conf_path_met,
-          "~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/High_Confidence_Pathway_Metabolite_Pairs.csv",
-          row.names = FALSE)
-
-library(ggplot2)
-library(stringr)
-library(reshape2)
-
-# ── Shared helper (same as before) ──────────────────────────────────────────
-get_stars <- function(p) {
-  if (p < 0.001) return("***")
-  if (p < 0.01)  return("**")
-  if (p < 0.05)  return("*")
-  return("ns")
-}
-high_conf_path_met$stars <- sapply(high_conf_path_met$p_value, get_stars)
-
-# ════════════════════════════════════════════════════════════════════════════
-# PLOT 1 — Heatmap of High-Confidence Pathway–Metabolite Pairs
-# (mirrors the role of your boxplots — shows the landscape of associations)
-# ════════════════════════════════════════════════════════════════════════════
-# ── Filter to top 20 most significant pathways ──────────────────────────────
-top_pathways_heatmap <- high_conf_path_met %>%
-  group_by(pathway) %>%
-  summarise(best_p = min(p_adjusted)) %>%
-  arrange(best_p) %>%
-  slice_head(n = 20) %>%
-  pull(pathway)
-
-heatmap_filtered <- high_conf_path_met[high_conf_path_met$pathway %in% top_pathways_heatmap, ]
-
-# ── Clean pathway names: strip PWY codes, replace dots, wrap ────────────────
-heatmap_filtered$pathway_clean <- gsub("PWY[0-9\\-]*\\s*", "", heatmap_filtered$pathway)
-heatmap_filtered$pathway_clean <- gsub("\\.", " ", heatmap_filtered$pathway_clean)
-heatmap_filtered$pathway_clean <- str_wrap(heatmap_filtered$pathway_clean, width = 40)
-
-# ── Plot ─────────────────────────────────────────────────────────────────────
-max_abs <- max(abs(heatmap_filtered$Estimate), na.rm = TRUE)
-
-# Heatmap
-heatmap_plot2 <- ggplot(heatmap_filtered,
-                        aes(x = metabolite, y = pathway_clean, fill = Estimate)) +
-  geom_tile(color = "white", linewidth = 0.5) +
-  geom_text(aes(label = stars), size = 5, color = "white", fontface = "bold") +
-  scale_fill_gradient2(low = "#D55E00", mid = "white", high = "#56B4E9",
-                       midpoint = 0, limits = c(-max_abs, max_abs),
-                       name = "Regression\nEstimate") +
-  labs(title    = "Microbial Pathway → Metabolite Associations",
-       subtitle = "Top 20 Pathways by FDR | * p<0.05  ** p<0.01  *** p<0.001",
-       x = "Metabolite", y = NULL) +
-  theme_minimal() +
-  theme(plot.title    = element_text(face = "bold", size = 20),
-        plot.subtitle = element_text(size = 15, color = "gray30"),
-        axis.text.x   = element_text(angle = 45, hjust = 1, size = 13, face = "bold"),
-        axis.text.y   = element_text(size = 12, face = "bold", lineheight = 0.9),
-        axis.title.x  = element_text(size = 15),
-        legend.title  = element_text(size = 14, face = "bold"),
-        legend.text   = element_text(size = 12),
-        panel.grid    = element_blank(),
-        plot.margin   = margin(t = 10, r = 30, b = 20, l = 10))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Heatmap_Top20.png",
-       heatmap_plot2, width = 18, height = 12, dpi = 300)
-
-# Top 20 pairs bar plot
-pair_plot <- ggplot(top20, aes(x = Estimate, y = reorder(pair_label, Estimate), fill = Estimate > 0)) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
-  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
-  scale_fill_manual(values = c("#D55E00", "#56B4E9"),
-                    labels = c("Decreased with Pathway Activity", "Increased with Pathway Activity"),
-                    name = "Direction of Change") +
-  labs(title    = "Top 20 Pathway–Metabolite Associations",
-       subtitle = "High-Confidence Pairs (FDR & Spearman p < 0.05)",
-       x = "Regression Estimate (Effect Size)", y = NULL) +
-  theme_minimal() +
-  theme(plot.title    = element_text(face = "bold", size = 20),
-        plot.subtitle = element_text(size = 16, color = "gray30"),
-        axis.text.y   = element_text(size = 13, face = "bold"),
-        axis.text.x   = element_text(size = 13),
-        axis.title.x  = element_text(size = 16),
-        legend.position = "bottom",
-        legend.title  = element_text(size = 14, face = "bold"),
-        legend.text   = element_text(size = 13),
-        legend.key.size = unit(1, "cm"),
-        plot.margin   = margin(t = 10, r = 30, b = 10, l = 10))
-
-ggsave("~/Desktop/Research_Project/Scripts/Integration/SA_Regressions/Pathway_Metabolite_Top20.png",
-       pair_plot, width = 16, height = 10, dpi = 300)
-
+ 
+ggsave(paste0(OUT_DIR, "Pathway_Metabolite_Top20.png"), pair_plot, width = 18, height = 11, dpi = 300)
+ 
 ```
 
 ## Step 6: Mediation Analysis
