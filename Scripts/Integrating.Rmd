@@ -31,6 +31,7 @@ library(lmerTest)
 library(compositions)
 library(MultiAssayExperiment)
 library(Seurat)
+library(reshape2)
 ```
 
 ### Load Data
@@ -500,12 +501,12 @@ Same variables are tested against both datasets.
 Datasets are reduced to 2D using PCA (metabolites) and PCoA (pathways, to preserve Bray-Curtis distances). Plot these components against confounders to see if main variance in data clusters by any clinical factors.
 
 ```{r}
-# 2.5. Confounder Checks (Multivariate)
+#  Confounder Checks (Multivariate)
 # List of potential confounders for individual screening
 confounders <- c("age", "EASI", "weeks_since_last_TCS_or_TCI",
                  "TEWL_mean", "pH_mean", "sa_abundance", "lesional")
 
-# ---- 2.5.1 Remove empty pathway sample ------------------
+# ---- Remove empty pathway sample ------------------
 pathway_matched_clean <- pathway_matched[rowSums(pathway_matched) > 0, ]
 meta_matched_clean    <- meta_matched[rownames(pathway_matched_clean), ]
 
@@ -513,7 +514,7 @@ meta_matched_clean    <- meta_matched[rownames(pathway_matched_clean), ]
 meta_matched_clean$pH_mean <- as.numeric(meta_matched_clean$pH_mean)
 meta_matched$pH_mean       <- as.numeric(meta_matched$pH_mean)
 
-# ---- 2.5.2 Pathway PERMANOVA (Screening + Primary Model) ----
+# ---- Pathway PERMANOVA (Screening + Primary Model) ----
 
 # Screening Individual Variables
 pathway_screening <- lapply(confounders, function(var) {
@@ -531,6 +532,7 @@ pathway_complete <- meta_matched_clean[complete.cases(meta_matched_clean[, c("sa
 pw_dist_complete <- vegdist(pathway_matched_clean[rownames(pathway_complete), ], method = "bray")
 
 set.seed(123)
+
 # 'by = margin' assesses the unique contribution of SA after accounting for pH
 pathway_primary_model <- adonis2(pw_dist_complete ~ pH_mean + sa_abundance, 
                                  data = pathway_complete, 
@@ -541,7 +543,7 @@ pathway_primary_model <- adonis2(pw_dist_complete ~ pH_mean + sa_abundance,
 cat("\n--- Pathway Primary Model (Adjusted for pH) ---\n")
 print(pathway_primary_model)
 
-# ---- 2.5.3 Metabolite PERMANOVA (Screening + Primary Model) ----
+# ----  Metabolite PERMANOVA (Screening + Primary Model) ----
 
 # Screening Individual Variables
 metabolite_screening <- lapply(confounders, function(var) {
@@ -717,19 +719,7 @@ Phyloseq object with samples and taxa that matches the species table.
 The samples are paired
 
 ```{r}
-library(phyloseq)
-library(vegan)
-library(lme4)
-library(lmerTest)
-library(dplyr)
-library(tibble)
-library(ggplot2)
-library(ggpubr)
-library(patchwork)
-library(reshape2)
- 
 SEED <- 123
- 
 # --- Output directory ---
 results_dir <- "~/Desktop/Research_Project/Scripts/Integration/SA_Effect/Cleaned/"
 dir.create(results_dir, recursive = TRUE, showWarnings = FALSE)
@@ -802,24 +792,69 @@ microbiome_dist <- vegdist(microbiome_data, method = "bray")
 ## FUNCTIONS 
  
 # Align pathway/metabolite tables to the (already-filtered) microbiome metadata via "eg_id.SITE.STATUS" bridge IDs, then drop any samples with all-zero rows for that layer 
-align_omics_table <- function(omics_table, meta) {
+# --- 3.1 Align an omics layer to the (already-filtered) microbiome sample
+#         set via "eg_id.SITE.STATUS" bridge IDs.
+#
+#         omics_table     : abundance/feature table for this layer
+#         omics_meta      : metadata data frame row-aligned 1:1 to
+#                           omics_table (must contain eg_id, sample_site,
+#                           lesional, pH_mean, sa_abundance)
+#         microbiome_meta : filtered microbiome metadata -- defines which
+#                           samples survived the global exclusion criteria
+#         median_sa       : SA median used for the microbiome sa_group
+#                           split, reused here so sa_group is consistent
+#                           across all omics layers
+#
+#         Bridge IDs are built independently from each side's own eg_id /
+#         sample_site / lesional columns and then intersected, so this
+#         works regardless of what naming convention the omics table's
+#         rownames happen to use. ---
+align_omics_table <- function(omics_table, omics_meta, microbiome_meta, median_sa) {
  
-  meta <- meta %>%
-    mutate(
-      les_clean  = gsub("NON_LES", "NONLES", lesional),
-      site_clean = toupper(sample_site),
-      bridge_id  = paste(eg_id, site_clean, les_clean, sep = ".")
+  stopifnot(identical(rownames(omics_table), rownames(omics_meta)))
+ 
+  build_bridge_id <- function(meta) {
+    meta %>%
+      mutate(
+        pH_mean    = as.numeric(as.character(pH_mean)),
+        les_clean  = gsub("NON_LES", "NONLES", lesional),
+        site_clean = toupper(sample_site),
+        bridge_id  = paste(eg_id, site_clean, les_clean, sep = ".")
+      )
+  }
+ 
+  omics_meta_b      <- build_bridge_id(omics_meta)
+  microbiome_meta_b <- build_bridge_id(microbiome_meta)
+ 
+  shared_ids <- intersect(omics_meta_b$bridge_id, microbiome_meta_b$bridge_id)
+ 
+  if (length(shared_ids) == 0) {
+    stop(
+      "No overlapping bridge IDs found between this omics layer and the ",
+      "microbiome metadata. Check that 'eg_id', 'sample_site' and ",
+      "'lesional' are coded consistently across layers."
     )
+  }
  
-  aligned <- omics_table[meta$bridge_id, , drop = FALSE]
-  rownames(aligned) <- rownames(meta)
-  aligned[is.na(aligned)] <- 0
+  keep_rows    <- omics_meta_b$bridge_id %in% shared_ids
+  aligned_data <- omics_table[keep_rows, , drop = FALSE]
+  aligned_meta <- omics_meta_b[keep_rows, ]
  
-  keep <- rowSums(aligned) > 0
+  # Recompute sa_group from the same median used for the microbiome layer,
+  # so the SA high/low split is identical across all three omics layers
+  aligned_meta$sa_group <- ifelse(
+    aligned_meta$sa_abundance >= median_sa, "SA_high", "SA_low"
+  )
  
-  list(data = aligned[keep, , drop = FALSE],
-       meta = meta[keep, ])
+  # Zero-impute missing feature values, then drop samples with no
+  # detected features in this layer
+  aligned_data[is.na(aligned_data)] <- 0
+  nonzero <- rowSums(aligned_data) > 0
+ 
+  list(data = aligned_data[nonzero, , drop = FALSE],
+       meta = aligned_meta[nonzero, ])
 }
+ 
  
 # PERMANOVA with a safeguard that the expected terms exist
 run_permanova <- function(dist_mat, meta, seed = SEED) {
@@ -1137,8 +1172,12 @@ ggsave(file.path(results_dir, "microbiome_alpha_diversity_plots.png"),
 
 ```{r}
 ##  PATHWAY LAYER
-
-pathway_aligned <- align_omics_table(pathway_matched, microbiome_meta)
+pathway_aligned <- align_omics_table(
+  omics_table     = pathway_matched_clean,
+  omics_meta      = meta_matched_clean,
+  microbiome_meta = microbiome_meta,
+  median_sa       = median_sa
+)
 pathway_data <- pathway_aligned$data
 pathway_meta <- pathway_aligned$meta
 pathway_dist <- vegdist(pathway_data, method = "bray")
@@ -1159,12 +1198,15 @@ p_pathway_rich_sa <- ggplot(pathway_results$richness$richness_df,
                              aes(x = sa_abundance, y = richness)) +
   geom_point(size = 3, alpha = 0.7) +
   geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
-  stat_cor(method = "spearman", label.y.npc = "top") +
+  stat_cor(method = "spearman", label.x = 5,
+           label.y = 275) +
   labs(title = "Pathway richness vs SA",
        subtitle = paste("LMM p =", format(pathway_p, digits = 3)),
        x = "SA abundance (%)", y = "Number of pathways") +
   theme_classic()
  
+show(p_pathway_rich_sa)
+
 p_pathway_rich_ph <- ggplot(pathway_results$richness$richness_df,
                              aes(x = pH_mean, y = richness, colour = lesional)) +
   geom_point(size = 3) +
@@ -1182,12 +1224,18 @@ ggsave(file.path(results_dir, "pathway_richness_combined.png"),
 ### 3.6. Metabolites
 
 ```{r}
-
-
+metab_matched_clean <- nmr_matched    # Use the NMR data as metabolite base
+meta_metab_clean    <- meta_matched   # Use the matched metadata
 ## METABOLITE LAYER
-metabolite_aligned <- align_omics_table(meta_matched, microbiome_meta)
+metabolite_aligned <- align_omics_table(
+  omics_table     = metab_matched_clean,
+  omics_meta      = meta_metab_clean,
+  microbiome_meta = microbiome_meta,
+  median_sa       = median_sa
+)
 metabolite_data <- metabolite_aligned$data
 metabolite_meta <- metabolite_aligned$meta
+
 metabolite_dist <- vegdist(metabolite_data, method = "bray")
  
 cat("Final metabolite N =", nrow(metabolite_meta), "\n")
@@ -1225,11 +1273,6 @@ ggsave(file.path(results_dir, "metabolite_richness_combined.png"),
        plot = metabolite_richness_plot, width = 12, height = 5, dpi = 300, bg = "white")
  
  
-```
-
-```{r}
-str(meta_matched)
-sapply(meta_matched, class)
 ```
 
 ### 3.7. PCoA Biplots
@@ -1342,6 +1385,8 @@ writeLines(capture.output(sessionInfo()),
 cat("Analysis complete. All results, plots, and session info\n")
 cat("saved to:", results_dir, "\n")
 ```
+
+# to delete if above works:
 
 ### 3a.2. PERMANOVA (Microbiome)
 
