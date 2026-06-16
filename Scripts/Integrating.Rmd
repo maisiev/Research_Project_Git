@@ -964,8 +964,8 @@ run_omics_block <- function(dist_mat, abund_data, meta, label, results_dir, seed
  
 # --- PCoA biplot coloured by SA group (centroids + dispersion) ---
 plot_betadisper_biplot <- function(bd_obj, meta, title, bd_p, permanova_r2,
-                                    colours = c(SA_high = "#404080",
-                                                SA_low  = "#69b3a2")) {
+                                   colours = c(SA_high = "#404080",
+                                               SA_low  = "#69b3a2")) {
  
   scores_df <- as.data.frame(scores(bd_obj, display = "sites"))
   scores_df$group     <- meta$sa_group[match(rownames(scores_df), rownames(meta))]
@@ -1017,10 +1017,10 @@ plot_betadisper_biplot <- function(bd_obj, meta, title, bd_p, permanova_r2,
       x = paste0("PCoA1 (", pct[1], "%)"),
       y = paste0("PCoA2 (", pct[2], "%)")
     ) +
-    theme_classic() +
+    theme_classic(base_size = 15) + ### CHANGED: Set a baseline size for all plot text (default is 11)
     theme(
-      plot.title    = element_text(size = 14, face = "bold"),
-      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      plot.title    = element_text(size = 18, face = "bold"),   ### CHANGED: Bumped up from 14
+      plot.subtitle = element_text(size = 18, colour = "black"), ### CHANGED: Bumped up from 10
       legend.position = "right"
     )
 }
@@ -1052,7 +1052,7 @@ plot_ph_envfit <- function(bd_obj, meta, title, permanova_r2, seed = SEED) {
   ef_scores$r2 <- ef$vectors$r
   ef_scores$p  <- ef$vectors$pvals
   ef_scores$label <- paste0("pH  R\u00b2=", round(ef_scores$r2, 2),
-                             "  p=", round(ef_scores$p, 3))
+                            "  p=", round(ef_scores$p, 3))
  
   arrow_df <- data.frame(
     x = 0, y = 0,
@@ -1077,8 +1077,8 @@ plot_ph_envfit <- function(bd_obj, meta, title, permanova_r2, seed = SEED) {
     ) +
     geom_text(
       data = arrow_df,
-      aes(x = xend * 1.12, y = yend * 1.12, label = ef_scores$label),
-      size = 3.2, hjust = 0.5
+      aes(x = xend * 1.15, y = yend * 1.15, label = ef_scores$label), ### CHANGED: Nudged labels slightly out (1.12 to 1.15) so they don't overlap the arrow tip
+      size = 4.5, hjust = 0.5 ### CHANGED: Bumped up from 3.2 (Uses mm)
     ) +
     geom_hline(yintercept = 0, colour = "grey80", linewidth = 0.3) +
     geom_vline(xintercept = 0, colour = "grey80", linewidth = 0.3) +
@@ -1092,21 +1092,24 @@ plot_ph_envfit <- function(bd_obj, meta, title, permanova_r2, seed = SEED) {
       x = paste0("PCoA1 (", pct[1], "%)"),
       y = paste0("PCoA2 (", pct[2], "%)")
     ) +
-    theme_classic() +
+    theme_classic(base_size = 15) + ### CHANGED: Set a baseline size for all plot text
     theme(
-      plot.title    = element_text(size = 14, face = "bold"),
-      plot.subtitle = element_text(size = 10, colour = "grey40"),
+      plot.title    = element_text(size = 18, face = "bold"),   ### CHANGED: Bumped up from 14
+      plot.subtitle = element_text(size = 12, colour = "grey40"), ### CHANGED: Bumped up from 10
       legend.position = "right"
     ) +
     guides(
-      fill  = guide_colorbar(order = 1, barwidth = 0.8, barheight = 5),
-      shape = guide_legend(order = 2, override.aes = list(fill = "grey50", size = 3))
+      fill  = guide_colorbar(order = 1, barwidth = 1.0, barheight = 5), ### CHANGED: Made colorbar slightly wider (0.8 to 1.0) to match larger text
+      shape = guide_legend(order = 2, override.aes = list(fill = "grey50", size = 4))   ### CHANGED: Increased legend point size from 3 to 4
     )
 }
- 
 ```
 
 ### 3.4. Microbiome
+
+PERMANOVA confirms that the microbiome composition differs by SA high/low. Adjusting for effect of pH to ensure the change is from SA and not just due to skin acidity.
+
+Partial mantel test uses continuous SA rather than binary split to complement the PERMANOVA result. If both agree = robust. Partial mantel test adjusts for the influence of pH.
 
 ```{r}
 ##  MICROBIOME LAYER
@@ -1144,28 +1147,35 @@ cat("\n--- Observed richness ---\n")
 print(summary(observed_lmm))
 sink()
  
+library(ggplot2)
+library(ggpubr) # Assuming you are using stat_cor
+
+# 1. Define a global base font size (e.g., 16 or 18 for larger text)
+large_theme <- theme_classic(base_size = 16)
+
 p_shannon <- ggplot(alpha_div, aes(x = sa_abundance, y = Shannon)) +
   geom_point(size = 3, alpha = 0.7) +
   geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
-  stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+  # Note: 'size' in stat_cor controls the text size inside the plot (in mm)
+  stat_cor(method = "spearman", label.x.npc = "left", size = 6) + 
   labs(title = "Shannon diversity vs SA",
        subtitle = paste("LMM p =", format(shannon_p, digits = 2)),
        x = "SA abundance (%)", y = "Shannon index") +
-  theme_classic()
- 
+  large_theme
+
 p_observed <- ggplot(alpha_div, aes(x = sa_abundance, y = Observed)) +
   geom_point(size = 3, alpha = 0.7) +
   geom_smooth(method = "lm", se = TRUE, colour = "steelblue") +
-  stat_cor(method = "spearman", label.x.npc = "left", size = 5) +
+  stat_cor(method = "spearman", label.x.npc = "left", size = 6) + 
   labs(title = "Species richness vs SA",
        subtitle = paste("LMM p =", format(observed_p, digits = 2)),
        x = "SA abundance (%)", y = "Observed species") +
-  theme_classic()
- 
+  large_theme
+
 alpha_plot <- p_shannon + p_observed
+
 ggsave(file.path(results_dir, "microbiome_alpha_diversity_plots.png"),
        plot = alpha_plot, width = 12, height = 5, dpi = 300, bg = "white")
- 
 ```
 
 ### 3.5. Microbial Pathways
@@ -1203,7 +1213,7 @@ p_pathway_rich_sa <- ggplot(pathway_results$richness$richness_df,
   labs(title = "Pathway richness vs SA",
        subtitle = paste("LMM p =", format(pathway_p, digits = 3)),
        x = "SA abundance (%)", y = "Number of pathways") +
-  theme_classic()
+  large_theme
  
 show(p_pathway_rich_sa)
 
@@ -1213,11 +1223,11 @@ p_pathway_rich_ph <- ggplot(pathway_results$richness$richness_df,
   geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") +
   scale_colour_manual(values = c("LES" = "#E41A1C", "NON_LES" = "#377EB8")) +
   labs(title = "Pathway richness vs skin pH", x = "pH", y = "Pathway richness") +
-  theme_classic()
+  large_theme
  
-pathway_richness_plot <- p_pathway_rich_sa | p_pathway_rich_ph
-ggsave(file.path(results_dir, "pathway_richness_combined.png"),
-       plot = pathway_richness_plot, width = 12, height = 5, dpi = 300, bg = "white")
+pathway_richness_plot <- p_pathway_rich_sa 
+ggsave(file.path(results_dir, "pathway_richness.png"),
+       plot = pathway_richness_plot, width = 6, height = 5, dpi = 300, bg = "white")
  
 ```
 
@@ -1281,8 +1291,8 @@ ggsave(file.path(results_dir, "metabolite_richness_combined.png"),
 ## PCoA BIPLOTS (SA group + pH envfit) FOR ALL THREE LAYERS
 omics_layers <- list(
   microbiome = microbiome_results,
-  pathway    = pathway_results,
-  metabolite = metabolite_results
+  pathway    = pathway_results
+  #metabolite = metabolite_results
 )
  
 biplots_sa <- list()
@@ -1332,14 +1342,13 @@ for (layer in names(omics_layers)) {
   sink()
 }
  
-combined_biplots <- biplots_sa$microbiome / biplots_sa$pathway / biplots_sa$metabolite +
+combined_biplots <- biplots_sa$microbiome +
   plot_annotation(
-    title = "Beta-dispersion across omics layers \u2014 SA high vs low",
-    theme = theme(plot.title = element_text(size = 15, face = "bold"))
+    theme = theme(plot.title = element_text(size =22, face = "bold"))
   )
  
 ggsave(file.path(results_dir, "betadispersion_combined.png"),
-       plot = combined_biplots, width = 9, height = 18, dpi = 300, bg = "white")
+       plot = combined_biplots, width = 9, height = 7, dpi = 300, bg = "white")
  
 
 ```
@@ -1388,73 +1397,7 @@ cat("saved to:", results_dir, "\n")
 
 # to delete if above works:
 
-### 3a.2. PERMANOVA (Microbiome)
-
-PERMANOVA confirms that the microbiome composition differs by SA high/low.
-
-Adjusting for effect of pH to ensure the change is from SA and not just due to skin acidity.
-
-```{r}
-variance_results <- list()
-# --- STEP 1: Get raw data out of Phyloseq ---
-otu_raw <- as.data.frame(t(otu_table(physeq))) # Samples as rows
-meta_raw <- data.frame(sample_data(physeq))
-
-# --- STEP 2: Handle pH Formatting (Numeric) ---
-# We do this first so we know which samples have "bad" pH values
-meta_raw$pH_mean <- as.numeric(as.character(meta_raw$pH_mean))
-
-# --- STEP 3: Identify "Bad" Samples ---
-# A. Samples with 0 total counts
-zero_samples <- rownames(otu_raw)[rowSums(otu_raw) == 0]
-# B. Samples with missing pH (the NAs we just introduced)
-na_ph_samples <- rownames(meta_raw)[is.na(meta_raw$pH_mean)]
-
-# Combine them into one list of samples to drop
-all_drops <- unique(c(zero_samples, na_ph_samples))
-cat("Dropping samples:", all_drops, "\n")
-
-# --- STEP 4: Create the "Final" Clean Objects ---
-# Only keep samples that are NOT in the drop list
-keep_samples  <- setdiff(rownames(otu_raw), all_drops)
-
-otu_final     <- otu_raw[keep_samples, ]
-meta_final    <- meta_raw[keep_samples, ]
-
-# Verify they match perfectly
-cat("Final count:", nrow(meta_final), "samples\n")
-
-# --- STEP 5: Calculate Distance ---
-bray_dist_final <- vegdist(otu_final, method = "bray")
-
-# --- STEP 6: Run PERMANOVA ---
-# Use 'meta_final' for everything so the rows match bray_dist_final
-set.seed(123)
-permanova_microbiome <- adonis2(
-  bray_dist_final ~ pH_mean + sa_group,
-  data = meta_final,
-  permutations = 999,
-  by = "margin",
-  strata = meta_final$eg_id
-)
-
-# Convert the PERMANOVA table to a data frame
-permanova_df <- as.data.frame(permanova_microbiome)
-
-# Add a column for the term names (pH_mean, sa_group, etc.)
-permanova_df$Variable <- rownames(permanova_df)
-
-# Save to your project folder
-write.csv(permanova_df, 
-          "~/Desktop/Research_Project/Scripts/Integration/SA_Effect/permanova_microbiome_results.csv", 
-          row.names = FALSE)
-
-print(permanova_microbiome)
-```
-
-### 3a.3. Partial Mantel Test (Microbiome)
-
-This uses continuous SA rather than binary split to complement the PERMANOVA result. If both agree = robust.
+# This uses continuous SA rather than binary split to complement the PERMANOVA result. If both agree = robust.
 
 Partial mantel test adjusts for the influence of pH.
 
@@ -3355,6 +3298,7 @@ plot_master <- merge(nmr_df, meta_cols, by = "NMR_sample_id")
  
 path_df <- as.data.frame(pathway_matched, check.names = FALSE)
 path_df$NMR_sample_id <- rownames(path_df)
+
 plot_pathways <- merge(path_df, meta_cols, by = "NMR_sample_id")
  
 # --- Individual boxplots: significant metabolites (p < 0.05) ---
@@ -3386,24 +3330,24 @@ path_significance_plot <- ggplot(pathway_hits, aes(x = Estimate, y = reorder(lab
   geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
   geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error),
                  height = 0.3, linewidth = 1, color = "#009E73") +
-  geom_point(size = 6, color = "#009E73") +
+  geom_point(size = 8, color = "#009E73") +
   geom_text(aes(x = Estimate + Std_Error, label = stars),
-            hjust = -0.3, vjust = 0.4, size = 8, color = "black", fontface = "bold") +
+            hjust = -0.3, vjust = 0.4, size = 18, color = "black", fontface = "bold") +
   scale_y_discrete(labels = function(x) str_wrap(x, width = 35)) +
   labs(title    = "Microbial Pathway Shifts: High vs Low SA",
        subtitle = "(* p < 0.05, ** p < 0.01, *** p < 0.001)",
        x = "Regression Estimate (Abundance)", y = NULL) +
   theme_minimal() +
-  theme(plot.title    = element_text(face = "bold", size = 22),
-        plot.subtitle = element_text(size = 16, color = "gray30"),
-        axis.text.y   = element_text(size = 16, face = "bold", lineheight = 0.8),
-        axis.text.x   = element_text(size = 16),
-        axis.title.x  = element_text(size = 18, face = "bold"),
+  theme(plot.title    = element_text(face = "bold", size = 28),
+        plot.subtitle = element_text(size = 22, color = "black"),
+        axis.text.y   = element_text(size = 22, face = "bold", lineheight = 0.8),
+        axis.text.x   = element_text(size = 22),
+        axis.title.x  = element_text(size = 22, face = "bold"),
         panel.grid.minor = element_blank(),
         plot.margin   = margin(t = 10, r = 60, b = 10, l = 80))
  
 ggsave(paste0(OUT_DIR, "Pathways_Significance.png"), path_significance_plot,
-       width = 14, height = 0.5 * nrow(pathway_hits) + 3, dpi = 300)
+       width = 15, height = 0.5 * nrow(pathway_hits) + 3, dpi = 300)
  
 # --- Forest plots: top 5 metabolites and top 5 pathways by p-value ---
 top_met_df <- head(metabolite_hits[order(metabolite_hits$p_value), ], 5)
@@ -3416,7 +3360,7 @@ top_path_df$feature_clean <- clean_pathway_name(top_path_df$feature)
 top_path_df$labeled_feature <- paste0(top_path_df$feature_clean, " ", top_path_df$stars)
  
 meta_top <- ggplot(top_met_df, aes(x = Estimate, y = reorder(labeled_feature, Estimate))) +
-  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "black") +
   geom_errorbarh(aes(xmin = Estimate - Std_Error, xmax = Estimate + Std_Error),
                  height = 0.3, linewidth = 1, color = "#D55E00") +
   geom_point(size = 6, color = "#D55E00") +
@@ -3425,11 +3369,11 @@ meta_top <- ggplot(top_met_df, aes(x = Estimate, y = reorder(labeled_feature, Es
        subtitle = "(* p < 0.05, ** p < 0.01, *** p < 0.001)",
        x = "Regression Estimate (NMR Intensity)", y = NULL) +
   theme_minimal() +
-  theme(axis.text.y   = element_text(size = 18, face = "bold"),
-        axis.text.x   = element_text(size = 16),
-        axis.title.x  = element_text(size = 18, face = "bold"),
-        plot.title    = element_text(face = "bold", size = 22),
-        plot.subtitle = element_text(size = 16))
+  theme(axis.text.y   = element_text(size = 22, face = "bold"),
+        axis.text.x   = element_text(size = 22),
+        axis.title.x  = element_text(size = 25, face = "bold"),
+        plot.title    = element_text(face = "bold", size = 25),
+        plot.subtitle = element_text(size = 22))
  
 ggsave(paste0(OUT_DIR, "Metabolites_Significance_forest.png"), meta_top, width = 10, height = 6, dpi = 300)
  
@@ -3459,7 +3403,7 @@ ggsave(paste0(OUT_DIR, "Pathways_Significance_forest.png"), path_top5_plot, widt
 metab_hits_plot <- ggplot(high_conf_met,
                            aes(x = Estimate, y = reorder(feature, Estimate),
                                fill = Estimate > 0)) +
-  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2) +
+  geom_bar(stat = "identity", alpha = 0.8, color = "black", linewidth = 0.2, width=0.5) +
   scale_fill_manual(values = c("#D55E00", "#56B4E9"),
                     labels = c("Decreased with SA", "Increased with SA"),
                     name   = "Direction of Change") +
@@ -3467,18 +3411,18 @@ metab_hits_plot <- ggplot(high_conf_met,
        subtitle = "High-Confidence Hits (Regression & Spearman p < 0.05)",
        x = "Regression Estimate (Effect Size)", y = NULL) +
   theme_minimal() +
-  theme(plot.title      = element_text(face = "bold", size = 24),
-        plot.subtitle   = element_text(size = 18),
-        axis.text.y     = element_text(size = 18, face = "bold"),
-        axis.text.x     = element_text(size = 16),
-        axis.title.x    = element_text(size = 18, face = "bold"),
+  theme(plot.title      = element_text(face = "bold", size = 28),
+        plot.subtitle   = element_text(size = 20),
+        axis.text.y     = element_text(size = 20, face = "bold"),
+        axis.text.x     = element_text(size = 20),
+        axis.title.x    = element_text(size = 22, face = "bold"),
         legend.position = "bottom",
-        legend.title    = element_text(size = 18, face = "bold"),
-        legend.text     = element_text(size = 16),
+        legend.title    = element_text(size = 22, face = "bold"),
+        legend.text     = element_text(size = 20 ),
         legend.key.size = unit(1.2, "cm"),
-        plot.margin     = margin(10, 20, 10, 20))
+        plot.margin     = margin(10, 10, 10, 20))
  
-ggsave(paste0(OUT_DIR, "SA_Metabolite_Hits_Final.png"), metab_hits_plot, width = 12, height = 9, dpi = 300)
+ggsave(paste0(OUT_DIR, "SA_Metabolite_Hits_Final.png"), metab_hits_plot, width = 10, height = 6, dpi = 300)
  
 # --- High-confidence bar plot: pathways ---
 high_conf_path_plot <- high_conf_path[!is.na(high_conf_path$feature), ]
@@ -3524,27 +3468,41 @@ heatmap_filtered$pathway_clean <- clean_pathway_name(heatmap_filtered$pathway)
  
 max_abs <- max(abs(heatmap_filtered$Estimate), na.rm = TRUE)
  
+library(ggplot2)
+library(stringr) # Ensure this is loaded for str_wrap
+
 heatmap_plot <- ggplot(heatmap_filtered, aes(x = metabolite, y = pathway_clean, fill = Estimate)) +
   geom_tile(color = "white", linewidth = 0.5) +
-  geom_text(aes(label = stars), size = 6, color = "white", fontface = "bold") +
+  
+  # 1. Move color inside aes() and map it to Estimate
+  geom_text(aes(label = stars, color = Estimate), size = 8, fontface = "bold", vjust = 0.7) +
+  
+  scale_y_discrete(labels = function(x) stringr::str_wrap(x, width = 35)) +
+  
   scale_fill_gradient2(low = "#D55E00", mid = "white", high = "#56B4E9",
+                       midpoint = 0, limits = c(-max_abs, max_abs),
+                       name = "Regression\nEstimate") +
+  
+  # 2. Add a matching color scale for the text (Dark text on light mid, white text on dark ends)
+  scale_color_gradient2(low = "white", mid = "gray20", high = "white",
                         midpoint = 0, limits = c(-max_abs, max_abs),
-                        name = "Regression\nEstimate") +
-  labs(title    = "Microbial Pathway -> Metabolite Associations",
+                        guide = "none") + # Hide this extra legend
+  
+  labs(title    = "Microbial Pathway-Metabolite Associations",
        subtitle = "Top 20 Pathways by FDR | * p<0.05  ** p<0.01  *** p<0.001",
-       x = "Metabolite", y = NULL) +
+       x = "Metabolite", y = "Pathway") +
   theme_minimal() +
-  theme(plot.title    = element_text(face = "bold", size = 22),
-        plot.subtitle = element_text(size = 16, color = "gray30"),
-        axis.text.x   = element_text(angle = 45, hjust = 1, size = 15, face = "bold"),
-        axis.text.y   = element_text(size = 14, face = "bold", lineheight = 0.9),
-        axis.title.x  = element_text(size = 16, face = "bold"),
-        legend.title  = element_text(size = 16, face = "bold"),
-        legend.text   = element_text(size = 14),
+  theme(plot.title    = element_text(face = "bold", size = 29),
+        plot.subtitle = element_text(size = 22, color = "gray30"),
+        axis.text.x   = element_text(angle = 45, hjust = 1, size = 20, face = "bold"),
+        axis.text.y   = element_text(size = 20, face = "bold", lineheight = 0.8), 
+        axis.title.x  = element_text(size = 22, face = "bold"),
+        axis.title.y  = element_text(size = 22, face = "bold"),
+        legend.title  = element_text(size = 22, face = "bold"),
+        legend.text   = element_text(size = 22),
         panel.grid    = element_blank(),
         plot.margin   = margin(t = 10, r = 30, b = 20, l = 10))
- 
-ggsave(paste0(OUT_DIR, "Pathway_Metabolite_Heatmap_Top20.png"), heatmap_plot, width = 18, height = 12, dpi = 300)
+ggsave(paste0(OUT_DIR, "Pathway_Metabolite_Heatmap_Top20.png"), heatmap_plot, width = 16, height = 18, dpi = 300)
  
 # --- Top 20 pathway-metabolite pairs bar plot ---
 top20 <- head(high_conf_path_met[order(high_conf_path_met$p_adjusted), ], 20)

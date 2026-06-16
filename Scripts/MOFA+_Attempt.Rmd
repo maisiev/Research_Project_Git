@@ -1,0 +1,499 @@
+---
+title: "MOFA+_Attempt"
+output: html_document
+date: "2026-06-16"
+---
+
+This current script failed to reach numerical convergence, resulting in an error state (NaN values) during the Evidence Lower Bound (ELBO) calculation. This failure is attributed to the combination of high feature sparsity within the pathway view and the extreme, bimodal distribution of *S. aureus* abundance in our cohort (N = 17). In probabilistic factor analysis, these data characteristics can lead to near-zero local variance estimates, preventing the stable estimation of latent factors. Due to these numerical instabilities and the resulting lack of model convergence, no latent factors were extracted; consequently, MOFA+ results were excluded from further downstream analysis.
+
+Most of the code is commented out due to it causing errors. Some post-hoc analysis and visualisation is present despite the model reaching an error state, this is because early on in the analysis some preliminary results were reached. However, these were not biologically accurate or correctly founded so have not been included.
+
+MOFA+ finds latent factors between data groups, allowing you to then correlate these factors with SA abundance or lesionality to see if the data types co-vary.
+
+```{r}
+
+library(MOFA2)
+library(data.table)
+
+# (Optional) set up reticulate connection with Python
+# reticulate::use_python("/Users/ricard/anaconda3/envs/base_new/bin/python", required = T)
+
+###############
+## Load data ##
+###############
+
+# Multiple formats are allowed for the input data:
+
+## -- Option 1 -- ##
+# nested list of matrices, where the first index refers to the view and the second index refers to the group.
+# samples are stored in the rows and features are stored in the columns.
+# Missing values must be filled with NAs, including samples missing an entire view
+
+# (...)
+
+## -- Option 2 -- ##
+# data.frame with columns ["sample","feature","view","group","value"]
+# In this case there is no need to have missing values in the data.frame,
+# they will be automatically filled in when creating the corresponding matrices
+
+file = "ftp://ftp.ebi.ac.uk/pub/databases/mofa/getting_started/data.txt.gz"
+data = fread(file)
+colnames(data)
+rownames(data)
+
+
+#######################
+# Create MOFA object ##
+#######################
+
+MOFAobject <- create_mofa(data)
+
+# Visualise data structure
+plot_data_overview(MOFAobject)
+
+####################
+## Define options ##
+####################
+
+# Data options
+# - scale_views: if views have different ranges/variances, it is good practice to scale each view to unit variance (default is FALSE)
+# - scale_groups: if groups have different ranges/variances, it is good practice to scale each group to unit variance (default is FALSE)
+data_opts <- get_default_data_options(MOFAobject)
+
+
+# Model options
+# - likelihoods: likelihood per view (options are "gaussian","poisson","bernoulli"). By default, they are guessed internally
+# - num_factors: number of factors. By default K=10
+model_opts <- get_default_model_options(MOFAobject)
+model_opts$num_factors <- 10
+
+# Training options
+# - maxiter: number of iterations
+# - convergence_mode: "fast", "medium", "slow". For exploration, the fast mode is good enough.
+# - startELBO: initial iteration to compute the ELBO (the objective function used to assess convergence)
+# - freqELBO: frequency of computations of the ELBO (the objective function used to assess convergence)
+# - drop_factor_threshold: minimum variance explained criteria to drop factors while training. Default is -1 (no dropping of factors)
+# - gpu_mode: use GPU mode? This needs cupy installed and a functional GPU, see https://cupy.chainer.org/
+# - verbose: verbose mode?
+# - seed: random seed
+train_opts <- get_default_training_options(MOFAobject)
+train_opts$convergence_mode <- "medium"
+train_opts$seed <- 42
+
+# (Optional) Set stochastic inference options
+# Only recommended with very large sample size (>1e6) and when having access to GPUs
+# - batch_size: float value indicating the batch size (as a fraction of the total data set: 0.10, 0.25 or 0.50)
+# - learning_rate: learning rate (we recommend values from 0.25 to 0.75)
+# - forgetting_rate: forgetting rate (we recommend values from 0.1 to 0.5)
+# - start_stochastic: first iteration to apply stochastic inference (recommended > 5)
+# stochastic_opts <- get_default_stochastic_options(MOFAobject)
+
+#########################
+## Prepare MOFA object ##
+#########################
+
+MOFAobject <- prepare_mofa(MOFAobject,
+  data_options = data_opts,
+  model_options = model_opts,
+  training_options = train_opts
+  # stochastic_options = stochastic_opts
+)
+
+#####################
+## Train the model ##
+#####################
+
+outfile <- paste0(getwd(),"/model.hdf5")
+MOFAobject <- run_mofa(MOFAobject, outfile, use_basilisk=TRUE)
+```
+
+### Preprocessing & Feature Selection
+
+```{r}
+{r}
+# ========================================================= # # 1. Alignment and Subsetting (Two-View) # # ========================================================= #  
+if (nrow(species_matched) == 44) { species_matched <- t(species_matched) } 
+# We only need common samples between the "Big Two" 
+common_samples <- intersect(rownames(nmr_matched), rownames(species_matched)) 
+nmr_sub     <- nmr_matched[common_samples, ] 
+species_sub <- species_matched[common_samples, ]
+# --- MODIFIED FILTERING --- # 
+# Only remove features that are ZERO in all samples (keeps the rare species)
+species_sub <- species_sub[, colSums(species_sub != 0) > 0] 
+nmr_sub     <- nmr_sub[, colSums(nmr_sub != 0) > 0] 
+cat("\nFeatures for Two-View Run:\n") 
+cat("Species:", ncol(species_sub), "| NMR:", ncol(nmr_sub), "\n") 
+#========================================================= # # 2. Transformation & Global Scaling # # ========================================================= # 
+# Define PQN Normalisation Function 
+pqn_normalise <- function(data) {
+  # 1. Create a reference sample (median of all samples)
+  reference <- apply(data, 2, median, na.rm = TRUE)
+  # 2. Calculate quotients (sample / reference) 
+  # We use t() because R operates on columns by default
+  quotients <- t(t(data) / reference) 
+  # 3. Find the median quotient for each sample
+  sample_medians <- apply(quotients, 1, median, na.rm = TRUE)
+  # 4. Divide original data by those medians
+  # If a median is 0 (rare), we replace with 1 to avoid NaN 
+  sample_medians[sample_medians == 0] <- 1 
+  return(data / sample_medians) 
+}
+
+#  # # Microbiome (Unfiltered) 
+species_log <- log1p(species_sub) 
+sd_sp <- sd(as.matrix(species_log), na.rm = TRUE) 
+if(is.na(sd_sp) || sd_sp == 0) sd_sp <- 1
+species_final_scaled <- (species_log - mean(as.matrix(species_log))) / sd_sp 
+# NMR (Unfiltered) 
+nmr_log <- log1p(pqn_normalise(nmr_sub)) 
+sd_nmr <- sd(as.matrix(nmr_log), na.rm = TRUE) 
+if(is.na(sd_nmr) || sd_nmr == 0) sd_nmr <- 1 
+nmr_final_scaled <- (nmr_log - mean(as.matrix(nmr_log))) / sd_nmr 
+
+#  # # --- Step 3: Robust Capping --- 
+species_final_scaled[species_final_scaled > 3]  <- 3 
+species_final_scaled[species_final_scaled < -3] <- -3 
+nmr_final_scaled[nmr_final_scaled > 3]          <- 3 
+nmr_final_scaled[nmr_final_scaled < -3]         <- -3 
+
+# # ========================================================= # # 4. Create the 2-View MAE # # ========================================================= #  
+mae_two_view <- MultiAssayExperiment(
+  experiments = ExperimentList( 
+    metabolites = SummarizedExperiment(assays = list(data = t(as.matrix(nmr_final_scaled)))), 
+    species     = SummarizedExperiment(assays = list(data = t(as.matrix(species_final_scaled))))    )  ) 
+
+# # Align Metadata 
+metadata_for_mae <- master_table %>% 
+  filter(!is.na(NMR_sample_id)) %>% 
+  distinct(NMR_sample_id, .keep_all = TRUE) %>% 
+  column_to_rownames("NMR_sample_id")   
+metadata_for_mae <- metadata_for_mae[intersect(rownames(metadata_for_mae), colnames(mae_two_view[[1]])), ] 
+colData(mae_two_view) <- DataFrame(metadata_for_mae) 
+
+# ========================================================= # # 5. Final Quality Control Checks # # ========================================================= #  
+cat("\nFinal MAE Structure (3-View Stable):\n") 
+print(mae_two_view) 
+if(any(sapply(experiments(mae_two_view), function(x) any(is.na(assay(x)))))) { 
+  stop("NAs detected! Check filtering or Log steps.") 
+} else { 
+    cat("\nSuccess: Preprocessing complete. Ready for MOFA+.\n") 
+  }
+
+
+```
+
+### Train MOFA+ Model
+
+```{r}
+{r}
+# =========================================================
+# 4.2. Training Block - The "Atomic" Stable Two-View
+# =========================================================
+mofa_two <- create_mofa(mae_two_view)
+
+model_opts <- get_default_model_options(mofa_two)
+data_opts <- get_default_data_options(mofa_two)
+train_opts <- get_default_training_options(mofa_two)
+
+# 1. Manual Scaling Override
+data_opts$scale_views <- FALSE
+
+# 2. THE NaN KILLERS
+model_opts$num_factors <- 3        # K=3 is safe for N=17
+model_opts$spikeslab_weights <- FALSE # CRITICAL: Disable the NaN trigger
+model_opts$ard_weights <- FALSE    # Disable automatic feature pruning
+model_opts$ard_factors <- FALSE    # Disable factor pruning
+
+# 3. Execution
+train_opts$convergence_mode <- "fast"
+train_opts$seed <- 64
+
+# Prepare and Run
+out_h5 <- "/Users/maisievarcoe/Desktop/mofa_two_view_unfiltered.hdf5"
+mofa_two <- prepare_mofa(mofa_two, data_options = data_opts, 
+                         model_options = model_opts, training_options = train_opts)
+mofa_two@training_options$outfile <- out_h5
+
+cat("\n--- Running Unfiltered Two-View Model (N=17) ---\n")
+run_mofa(mofa_two, use_basilisk = TRUE)
+
+# =========================================================
+# 6. LOAD, VERIFY, AND SAVE (Two-View Unfiltered)
+# =========================================================
+if(file.exists(out_h5)) {
+  # Load the model from the temporary HDF5 file
+  model_two_final <- load_model(out_h5)
+  
+  # Check mathematical stability (ELBO check)
+  elbo_vals <- model_two_final@training_stats$elbo
+  elbo_final <- as.numeric(tail(elbo_vals, 1))
+  
+  if(is.finite(elbo_final)) {
+    saveRDS(model_two_final, out_rds)
+    cat("\n--- SUCCESS! Two-View Model saved to project folder ---\n")
+    
+    # 1. Visual check of variance explained
+    print(plot_variance_explained(model_two_final))
+    
+    # 2. Plot the data heatmap to see the factor alignment
+    print(plot_data_heatmap(model_two_final, view = "species", factor = 1, features = 10))
+    
+  } else {
+    stop("Model training failed: ELBO resulted in NaN.")
+  }
+} else {
+  stop("HDF5 file was not created.")
+}
+
+# =========================================================
+# 7. QUICK BIOLOGICAL CHECK (S. aureus Focus)
+# =========================================================
+if(exists("model_two_final")) {
+  # 1. Extract weights for Species
+  sw <- get_weights(model_two_final, views="species")[[1]]
+  sa_name <- "s__Staphylococcus_aureus"
+  
+  if(sa_name %in% rownames(sw)) {
+    cat("\nS. aureus Loadings across Factors:\n")
+    print(round(sw[sa_name, ], 3))
+    
+    # Identify the factor where S. aureus has the strongest influence
+    target_factor <- which.max(abs(sw[sa_name, ]))
+    cat("\nS. aureus is the primary driver of Factor:", target_factor, "\n")
+    
+    # 2. Identify Metabolites linked to this specific Factor
+    mw <- get_weights(model_two_final, views="metabolites")[[1]]
+    top_metabs <- sort(abs(mw[, target_factor]), decreasing = TRUE)
+    top_metabs_names <- names(head(top_metabs, 10))
+    
+    cat("\nTop 10 Metabolites associated with the S. aureus Factor (Factor", target_factor, "):\n")
+    print(round(mw[top_metabs_names, target_factor], 3))
+  }
+}
+```
+
+### Sensitivity & Robustness Checks
+
+```{r}
+{r}
+# ==============================================================================
+# SENSITIVITY ANALYSIS — MOFA+ WITHOUT OUTLIERS (N=15)
+# ==============================================================================
+
+# 1. PREPARE THE "CLEAN" DATA (N=14)
+# ------------------------------------------------------------------------------
+patients_to_drop <- c("GYECZ1187", "GYECZ1197")
+keep_logic <- !(mae_data$eg_id %in% patients_to_drop)
+mae_clean <- mae_data[, keep_logic, ]
+
+# --- CRITICAL: CLEAN DATA BEFORE INITIALISING MOFA ---
+pw_data <- assay(mae_clean[["pathways"]])
+bad_features <- which(apply(pw_data, 1, var) == 0)
+
+if(length(bad_features) > 0) {
+  cat("Warning: Found", length(bad_features), "pathways with zero variance. Removing...\n")
+  mae_clean <- mae_clean[-bad_features, , "pathways"]
+}
+
+# 2. INITIALISE BASE OBJECT
+# ------------------------------------------------------------------------------
+mofa_clean_base <- create_mofa(mae_clean)
+
+data_opts_clean <- get_default_data_options(mofa_clean_base)
+model_opts_clean <- get_default_model_options(mofa_clean_base)
+train_opts_clean <- get_default_training_options(mofa_clean_base)
+
+data_opts_clean$scale_views <- TRUE
+model_opts_clean$num_factors <- 3
+train_opts_clean$convergence_mode <- "fast"
+train_opts_clean$maxiter <- 500
+
+mofa_clean_base <- prepare_mofa(
+  object = mofa_clean_base,
+  data_options = data_opts_clean,
+  model_options = model_opts_clean,
+  training_options = train_opts_clean
+)
+
+# 3. STABILITY LOOP
+# ------------------------------------------------------------------------------
+n_inits <- 3
+best_elbo_clean <- -Inf
+best_model_clean <- NULL
+
+for (i in 1:n_inits) {
+  cat("\n--- Running Sensitivity Init", i, "of", n_inits, "---\n")
+  tmp_obj <- mofa_clean_base
+  tmp_obj@training_options$seed <- 123 + i
+  
+  try({
+    trained <- run_mofa(tmp_obj, use_basilisk = TRUE)
+    current_elbo <- as.numeric(tail(trained@training_stats$elbo, 1))
+    
+    if (!is.na(current_elbo) && is.finite(current_elbo) && current_elbo > best_elbo_clean) {
+      best_elbo_clean <- current_elbo
+      best_model_clean <- trained
+      cat(">>> New Best Sensitivity Model! ELBO:", round(best_elbo_clean, 2), "\n")
+    }
+  })
+}
+```
+
+### Visualisations
+
+```{r}
+# 1. SETUP
+# ------------------------------------------------------------------------------
+mofa_to_plot <- readRDS("~/Desktop/Research_Project/Scripts/Integration/mofa_model_v4_BEST.rds")
+
+# Ensure the output directory exists
+output_dir <- "~/Desktop/Research_Project/Scripts/Integration/MOFA+/"
+if (!dir.exists(output_dir)) dir.create(output_dir, recursive = TRUE)
+
+# 2. VARIANCE EXPLAINED
+# ------------------------------------------------------------------------------
+p1 <- plot_variance_explained(mofa_to_plot, x="view", y="factor") + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+p2 <- plot_variance_explained(mofa_to_plot, plot_total = TRUE)
+
+ggsave(paste0(output_dir, "mofa_variance_per_factor_v5.png"), 
+       plot = p1, width = 7, height = 5, dpi = 300, bg="white")
+ggsave(paste0(output_dir, "mofa_variance_total_v5.png"), 
+       plot = p2, width = 6, height = 5, dpi = 300, bg="white")
+
+# 3. FACTOR SCORES HEATMAP
+# ------------------------------------------------------------------------------
+factors <- get_factors(mofa_to_plot)$group1
+
+# Create sample annotation based on row names
+sample_anno <- data.frame(
+  Status = ifelse(grepl("NONLES", rownames(factors)), "NONLES", "LES"),
+  row.names = rownames(factors)
+)
+
+anno_colours <- list(Status = c(LES = "#E41A1C", NONLES = "#377EB8"))
+
+png(paste0(output_dir, "mofa_heatmap_v5.png"), 
+    width = 1300, height = 800, res = 120, bg = "white")
+
+pheatmap(factors, 
+         annotation_row = sample_anno, 
+         annotation_colors = anno_colours, 
+         cluster_rows = TRUE, 
+         cluster_cols = FALSE, 
+         scale = "column", 
+         color = colorRampPalette(c("#2166AC", "white", "#D6604D"))(100), 
+         main = "MOFA+ Factor Scores per Sample", 
+         fontsize = 12, 
+         cellwidth = 50)
+dev.off()
+
+# Plot the top 15 features for Factor 1
+p_weights <- plot_top_weights(mofa_to_plot, 
+                             view = "pathways", 
+                             factor = 1, 
+                             nfeatures = 15)
+ggsave(paste0(output_dir, "mofa_top_pathways_weights_F1.png"), p_weights)
+
+```
+
+### Correlate Factor Scores with S. Aureus Abundance
+
+Correlate MOFA+ factor scores with SA abundance to identify which factor tracks with SA.
+
+**Why do this? -\>** MOFA+ factors are hidden variables capturing a pattern of co-variation across data. When factors is correlated with SA abundance and score consistently high it means samples from SA high patients tend to score high on factor X (vice versa for low SA). Which would mean the biological variation captured by factor X tracks with SA abundance. Finding out this would help you answer the biological story of what changes in the microbiome and metabolome when SA is high.
+
+So the Spearman correlation are between each factor's score with SA and EASI (lesionality). For each factor (1-4), across all 18 samples, asking if that samples score on that factor track with how much SA that sample has.
+
+```{r}
+{r}
+# Add SA abundance to factors dataframe # factors_df <- as.data.frame(factors) # factors_df$sa_abundance <- master_table$sa_abundance[ # match(rownames(factors_df), master_table$NMR_sample_id)
+# ]
+# factors_df$EASI <- master_table$EASI[
+#   match(rownames(factors_df), master_table$NMR_sample_id) # ] # factors_df$lesional <- master_table$lesional[ # match(rownames(factors_df), master_table$NMR_sample_id)
+# ]
+#
+# # -------- F1&2 Correlations with SA & EASI -------------
+# # Spearman correlations with SA - Factors 1 and 2 only
+# sa_cors <- cor(factors_df[, 1:2],
+#                factors_df$sa_abundance, # method = "spearman", # use = "complete.obs") # # print(sa_cors) # # Spearman correlations with EASI - Factors 1 and 2 only # easi_cors <- cor(factors_df[, 1:2], # factors_df$EASI,
+#                  method = "spearman",
+#                  use = "complete.obs")
+#
+# print(easi_cors)
+# # Run cor.test for each factor against SA and EASI
+# # p values for Factors 1 and 2 only
+# for(f in paste0("Factor", 1:2)) {
+#   cat("\n---", f, "---\n")
+#
+#   sa_test <- cor.test(factors_df[[f]],
+#                       factors_df$sa_abundance, # method = "spearman", exact=FALSE) # cat("SA: rho =", round(sa_test$estimate, 3),
+#       "  p =", round(sa_test$p.value, 3), "\n") ## easi_test <- cor.test(factors_df[[f]], # factors_df$EASI,
+#                         method = "spearman", exact=FALSE)
+#   cat("EASI: rho =", round(easi_test$estimate, 3), # " p =", round(easi_test$p.value, 3), "\n")
+# }
+#
+# #------- F1&2 Correlations with all Clincal Variables-------
+# # Select numeric clinical variables
+# clinical_vars <- master_table %>%
+#   select(sa_abundance, EASI, age, TEWL_mean, pH_mean,
+#          weeks_since_last_TCS_or_TCI) %>%
+#   mutate(
+#     TEWL_mean = as.numeric(gsub("none|not_done", NA, TEWL_mean)),
+#     pH_mean = as.numeric(gsub("none|not_done", NA, pH_mean)),
+#     EASI = as.numeric(EASI),
+#     age = as.numeric(age)
+#   )
+# # Match to factor scores by NMR sample ID
+# clinical_vars <- clinical_vars[
+#   match(rownames(factors_df), master_table$NMR_sample_id), # ] # # # Correlate all clinical variables against Factors 1 and 2 # for(f in paste0("Factor", 1:2)) { # cat("\n======", f, "======\n") # for(v in colnames(clinical_vars)) { # test <- cor.test(factors_df[[f]], clinical_vars[[v]], # method = "spearman", exact = FALSE) # cat(v, ": rho =", round(test$estimate, 3),
+#         "  p =", round(test$p.value, 3), "\n") # } # } # # # Add lesional status to factors_df and plot Factor 1 by lesional status # F1_lesional <- ggplot(factors_df, aes(x = lesional, y = Factor1, fill = lesional)) + # geom_boxplot() + # geom_jitter(width = 0.1) + # labs(title = "Factor 1 scores by lesional status") + # theme_classic() # # # Test it statistically # wilcox.test(Factor1 ~ lesional, data = factors_df) # # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_Lesionality3.png", # plot = F1_lesional, # width = 8, height = 5, dpi = 300) # # # test all factors correlation with lesionality # for(f in paste0("Factor", 1:4)) { # test <- wilcox.test(factors_df[[f]] ~ factors_df$lesional)
+#   cat(f, ": p =", round(test$p.value, 3), "\n") # } #
+```
+
+```{r}
+
+#Exploring the factors
+
+# {r}
+# plot_variance_explained(mofa_obj, max_r2 =10)
+# 
+# 
+# # --- Top Weights ----------
+# # Plots top n features with the highest absolute loading value
+# # for a specific factor
+# # Good for identifying the main drivers of a factor
+# # high absolute loading value >0.8
+# 
+# target_factors <- 1:4
+# target_views <- c("species", "metabolites")
+# 
+# for (f in target_factors) {
+#   for (v in target_views) {
+#     
+#     # 1. Create the Top Weights plot
+#     p <- plot_top_weights(mofa_obj, 
+#                           view = v, 
+#                           factor = f, 
+#                           nfeatures = 10, 
+#                           scale = TRUE) + 
+#       ggtitle(paste("Top 10", v, "Weights for Factor", f)) +
+#       theme(axis.text.y = element_text(size = 10)) # Adjust font here
+#     
+#     # 2. Create a dynamic filename
+#     file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/top_", v, "_weights_F", f, ".png")
+#     
+#     # 3. Save
+#     ggsave(file_name, plot = p, width = 9, height = 6, dpi = 300)
+#     
+#     message(paste("Saved plot for Factor", f, "View", v))
+#   }
+# }
+```
+
+### Three-view model with pathways
+
+```{r}
+# {r} # # ------- Post-hoc Analysis - 3 View Model ------- #  # # Add clinical variables to factors dataframe # factors_df <- as.data.frame(factors) # factors_df$sa_abundance <- master_table$sa_abundance[ #   match(rownames(factors_df), master_table$NMR_sample_id)] # factors_df$EASI <- master_table$EASI[ #   match(rownames(factors_df), master_table$NMR_sample_id)] # factors_df$lesional <- master_table$lesional[ #   match(rownames(factors_df), master_table$NMR_sample_id)] #  # # -------- Correlations with all factors (not just 1&2) ------------- # # Now we know Factors 1 and 2 are SA-associated, test all 4 # for(f in paste0("Factor", 1:4)) { #   cat("\n---", f, "---\n") #    #   sa_test <- cor.test(factors_df[[f]], #                       factors_df$sa_abundance, #                       method = "spearman", exact = FALSE) #   cat("SA:   rho =", round(sa_test$estimate, 3), #       "  p =", round(sa_test$p.value, 3), "\n") #    #   easi_test <- cor.test(factors_df[[f]], #                         factors_df$EASI, #                         method = "spearman", exact = FALSE) #   cat("EASI: rho =", round(easi_test$estimate, 3), #       "  p =", round(easi_test$p.value, 3), "\n") # } #  # # -------- Correlations with all clinical variables ------- # clinical_vars <- master_table %>% #   select(sa_abundance, EASI, age, TEWL_mean, pH_mean, #          weeks_since_last_TCS_or_TCI) %>% #   mutate( #     TEWL_mean = as.numeric(gsub("none|not_done", NA, TEWL_mean)), #     pH_mean = as.numeric(gsub("none|not_done", NA, pH_mean)), #     EASI = as.numeric(EASI), #     age = as.numeric(age) #   ) # clinical_vars <- clinical_vars[ #   match(rownames(factors_df), master_table$NMR_sample_id), ] #  # # Test all 4 factors against all clinical variables # for(f in paste0("Factor", 1:4)) { #   cat("\n======", f, "======\n") #   for(v in colnames(clinical_vars)) { #     test <- cor.test(factors_df[[f]], clinical_vars[[v]], #                      method = "spearman", exact = FALSE) #     cat(v, ": rho =", round(test$estimate, 3), #         "  p =", round(test$p.value, 3), "\n") #   } # } #  # # -------- Lesionality ------- # F1_lesional <- ggplot(factors_df, aes(x = lesional, y = Factor1,  #                                        fill = lesional)) + #   geom_boxplot() + #   geom_jitter(width = 0.1) + #   scale_fill_manual(values = c("LES" = "#F8766D", "NON_LES" = "#00BFC4")) + #   labs(title = "Factor 1 scores by lesional status") + #   theme_classic() #  # wilcox.test(Factor1 ~ lesional, data = factors_df) #  # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_Lesionality_3view.png", #        plot = F1_lesional, width = 8, height = 5, dpi = 300) #  # # Test all factors against lesionality # for(f in paste0("Factor", 1:4)) { #   test <- wilcox.test(factors_df[[f]] ~ factors_df$lesional) #   cat(f, ": p =", round(test$p.value, 3), "\n") # } #  # # -------- Variance explained ------- # plot_variance_explained(mofa_obj, max_r2 = 10) #  # # -------- Top weights - now includes pathways view ------- # target_factors <- 1:4 # target_views <- c("species", "metabolites", "pathways")  # added pathways #  # for(f in target_factors) { #   for(v in target_views) { #     p <- plot_top_weights(mofa_obj, #                           view = v, #                           factor = f, #                           nfeatures = 10, #                           scale = TRUE) + #       ggtitle(paste("Top 10", v, "Weights for Factor", f)) + #       theme(axis.text.y = element_text(size = 10)) #      #     file_name <- paste0("~/Desktop/Research_Project/Scripts/Integration/MOFA+/top_", #                         v, "_weights_F", f, "_3view.png") #     ggsave(file_name, plot = p, width = 9, height = 6, dpi = 300) #     message(paste("Saved plot for Factor", f, "View", v)) #   } # } #  # # Factor 1 scores by SA abundance - scatter plot # factors_df$sa_abundance <- as.numeric(factors_df$sa_abundance) #  # p_f1_sa <- ggplot(factors_df, aes(x = sa_abundance, y = Factor1,  #                                    colour = lesional)) + #   geom_point(size = 3) + #   geom_smooth(method = "lm", se = TRUE, colour = "black", linetype = "dashed") + #   scale_colour_manual(values = c("LES" = "#E41A1C", "NON_LES" = "#377EB8")) + #   labs(title = "MOFA+ Factor 1 vs SA Abundance", #        x = "SA Abundance (%)", #        y = "Factor 1 Score", #        colour = "Lesional Status") + #   annotate("text", x = max(factors_df$sa_abundance, na.rm = TRUE) * 0.1, #            y = max(factors_df$Factor1, na.rm = TRUE) * 0.9, #            label = "rho = -0.776, p < 0.001", #            hjust = 0, size = 4.5) + #   theme_classic() #  # p_f1_sa #  # ggsave("~/Desktop/Research_Project/Scripts/Integration/MOFA+/F1_by_SA_3view.png", #        plot = p_f1_sa, width = 8, height = 5, dpi = 300, bg = "white")
+```
