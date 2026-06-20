@@ -2229,7 +2229,7 @@ HLA-DRB1 (5/10) issue: HLA genes are very polymorphic between individuals, and d
 Split gene list into two groups rather than treating the whole significant-gene list as equally trustworthy
 
 | Patient ID | Lesional sample | Non-lesional sample | SA abundance (both sites) | SA status |
-|----|----|----|----|----|
+|---------------|---------------|---------------|---------------|---------------|
 | GYECZ1191 | A17 (les) | A18 (non_les) | 49.3 / 67.5 | High |
 | GYECZ1193 | A21 (les) | A22 (non_les) | 89.3 / 57.3 | High |
 | GYECZ1197 | A38 (les) | A37 (non_les) | 0.0 / 2.5 | Low |
@@ -2593,19 +2593,6 @@ comparison <- data.frame(
 cor(comparison$n_DEGs, comparison$n_cells, use = "complete.obs")
 print(comparison)
  
-```
-
-```{r}
-gene_recurrence_summary <- gene_recurrence %>% dplyr::count(gene, sort = TRUE)
-
-# Likely patient-level artifacts, not S. aureus-specific - treat with real suspicion
-gene_recurrence_summary %>% dplyr::filter(n >= 4)
-
-# Cluster-restricted hits - at least show some specificity, the more
-# interesting (though still exploratory, n=3) candidates
-gene_recurrence_summary %>% dplyr::filter(n == 1)
-
-gene_recurrence_summary %>% dplyr::filter(n >= 4)
 ```
 
 ```{r}
@@ -2999,9 +2986,23 @@ cat("\nLesional breakdown:\n")
 print(table(adata_qc$les))
 ```
 
+```{r}
+meta_check_all <- unique(adata_qc@meta.data[, c(sample_col, "true_patient", "SA_status", "les", "s_aureus", "s_aureus_levels")])
+print(meta_check_all)
+```
+
 ### Preparing GEM Inputs
 
+Here we prepare the GEM inputs grouped by patient
+
 ```{r}
+adata_qc <- NormalizeData(adata_qc)  # default: LogNormalize, scale.factor = 10000
+cat("Layers now:", Layers(adata_qc), "\n")
+
+expr_matrix <- GetAssayData(adata_qc, layer = "data")
+cat("dim(expr_matrix):", dim(expr_matrix), "\n")
+cat("ncol(adata_qc):", ncol(adata_qc), "\n")
+cat("Identical colnames:", identical(colnames(adata_qc), colnames(expr_matrix)), "\n")
 
 expr_matrix <- GetAssayData(adata_qc, layer = "data")
 
@@ -3013,6 +3014,93 @@ cat("SA_status:", table(adata_qc@meta.data[[sa_col]], useNA = "ifany"), "\n\n")
 
 cell_types <- adata_qc@meta.data[[ct_col]]
 sa_status  <- adata_qc@meta.data[[sa_col]]
+
+sample_id_map <- c(
+  "A17" = "GYECZ1191.ABDO.LES",
+  "A18" = "GYECZ1191.ABDO.NONLES",
+  "A21" = "GYECZ1193.LACF.LES",
+  "A22" = "GYECZ1193.LACF.NONLES",
+  "A37" = "GYECZ1197.RACF.NONLES",
+  "A38" = "GYECZ1197.BACK.LES"
+)
+
+sample_ids_vec <- adata_qc@meta.data[[sample_col]]
+
+cat("KER1 cell counts per sample:\n")
+for (a_id in names(sample_id_map)) {
+  n_cells <- sum(sample_ids_vec == a_id & cell_types == "KER1")
+  cat(sprintf("  %s (%s): %d KER1 cells\n", a_id, sample_id_map[[a_id]], n_cells))
+}
+
+ker1_cols <- lapply(names(sample_id_map), function(a_id) {
+  mask <- sample_ids_vec == a_id & cell_types == "KER1"
+  mask[is.na(mask)] <- FALSE   # guard against NA comparisons
+
+  n_cells <- sum(mask)
+  if (n_cells == 0) {
+    cat("WARNING: no KER1 cells for", a_id, "\n")
+    return(rep(NA, nrow(expr_matrix)))
+  }
+  rowMeans(expr_matrix[, mask, drop = FALSE])
+})
+
+mean_expr_KER1_by_sample <- do.call(cbind, ker1_cols)
+colnames(mean_expr_KER1_by_sample) <- unname(sample_id_map[names(sample_id_map)])
+rownames(mean_expr_KER1_by_sample) <- rownames(expr_matrix)
+
+out_dir <- "~/Desktop/Research_Project/Scripts/Integration/GEM/pyglpk/Data" 
+write.csv(mean_expr_KER1_by_sample, file.path(out_dir, "mean_expr_KER1_by_sample.csv"))
+cat("Saved. Shape:", dim(mean_expr_KER1_by_sample), "\n"
+```
+
+```{r}
+build_pseudobulk_by_sample <- function(target_cell_type, file_name) {
+  n_cells_vec <- sapply(names(sample_id_map), function(a_id) {
+    sum(sample_ids_vec == a_id & cell_types == target_cell_type)
+  })
+
+  cat(sprintf("\n%s cell counts per sample:\n", target_cell_type))
+  for (a_id in names(sample_id_map)) {
+    cat(sprintf("  %s (%s): %d cells\n", a_id, sample_id_map[[a_id]], n_cells_vec[a_id]))
+  }
+
+  cell_counts <- data.frame(
+    sample  = unname(sample_id_map[names(sample_id_map)]),
+    n_cells = unname(n_cells_vec)
+  )
+  count_file <- paste0("cell_counts_", gsub(" ", "", target_cell_type), ".csv")
+  write.csv(cell_counts, file.path(out_dir, count_file), row.names = FALSE)
+  cat("Saved", count_file, "\n")
+
+  cell_cols <- lapply(names(sample_id_map), function(a_id) {
+    mask <- sample_ids_vec == a_id & cell_types == target_cell_type
+    mask[is.na(mask)] <- FALSE
+    if (sum(mask) == 0) {
+      cat("WARNING: no", target_cell_type, "cells for", a_id, "\n")
+      return(rep(NA, nrow(expr_matrix)))
+    }
+    rowMeans(expr_matrix[, mask, drop = FALSE])
+  })
+
+  mean_expr_by_sample <- do.call(cbind, cell_cols)
+  colnames(mean_expr_by_sample) <- unname(sample_id_map[names(sample_id_map)])
+  rownames(mean_expr_by_sample) <- rownames(expr_matrix)
+
+  write.csv(mean_expr_by_sample, file.path(out_dir, file_name))
+  cat("Saved", file_name, "- Shape:", dim(mean_expr_by_sample), "\n")
+  invisible(mean_expr_by_sample)
+}
+
+mean_expr_TCELL_by_sample <- build_pseudobulk_by_sample("T CELL", "mean_expr_TCELL_by_sample.csv")
+
+mean_expr_KER1_by_sample <- build_pseudobulk_by_sample("KER1", "mean_expr_KER1_by_sample.csv")
+```
+
+Here we prepare the GEM input grouped by SA status
+
+```{r}
+
+
 
 # --- All samples ---
 mean_expr_per_celltype <- do.call(cbind, lapply(unique(cell_types), function(ct) {
