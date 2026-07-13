@@ -1396,7 +1396,7 @@ cat("Analysis complete. All results, plots, and session info\n")
 cat("saved to:", results_dir, "\n")
 ```
 
-## Step 5: Linear **Regressions - Identifying SA High/Low Associated Features**
+## Step 4: Linear **Regressions - Identifying SA High/Low Associated Features**
 
 Identifying molecular signatures driven by SA colonisation, running feature-wise linear regressions across two data modalities: NMR Metabolites (n=38) and microbial pathways (n = 248)
 
@@ -1416,7 +1416,7 @@ Identifying molecular signatures driven by SA colonisation, running feature-wise
 
 -   **Validation:** significant results from the linear regression are cross-validated using Spearman correlation to ensure the differences between high and low groups are robust and not driven by outliers
 
-### 5.1. Setup
+### 4.1. Setup
 
 ```{r}
 library(ggplot2)
@@ -1451,7 +1451,7 @@ get_stars <- function(p) {
 }
 ```
 
-### 5.2. Linear Regressions
+### 4.2. Linear Regressions
 
 ```{r}
 ##Regression functions 
@@ -1584,7 +1584,7 @@ results_path_met    <- run_pathway_metabolite_regression(nmr_matched, pathway_ma
  
 ```
 
-### 5.3. Spearman Sensitivity Checks (continuous SA / pathway-metabolite pairs)
+### 4.3. Spearman Sensitivity Checks (continuous SA / pathway-metabolite pairs)
 
 Running Spearman's correlations on the whole dataset and then finding overlapping significant features with the linear regressions, to see what is significant in both tests.
 
@@ -1746,7 +1746,7 @@ table(check_df$excluded_reason)
 print(check_df[check_df$excluded_reason != "Retained", ])
 ```
 
-### 5.4. Visualisations
+### 4.4. Visualisations
 
 ```{r}
 ## Visualisations
@@ -2282,7 +2282,7 @@ print(table(adata_qc$sample, adata_qc$les))
 
 ```
 
-## Step 6: DEG for SA High vs Low
+## Step 5: DEG for SA High vs Low
 
 Differential expression analysis comparing High vs Low SA groups.
 
@@ -2292,7 +2292,7 @@ Differential expression analysis comparing High vs Low SA groups.
 | GYECZ1193 | A21 (les) | A22 (non_les) | 89.3 / 57.3 | High |
 | GYECZ1197 | A38 (les) | A37 (non_les) | 0.0 / 2.5 | Low |
 
-### 6.1 Build SA Status & Bridge to scRNA Samples
+### 5.1 Build SA Status & Bridge to scRNA Samples
 
 ```{r}
 master_table <- master_table %>%
@@ -2346,7 +2346,7 @@ table(adata_sa$sample, adata_sa$true_patient, useNA = "always")
  
 ```
 
-### 6.2 Pseudobulk & Differential Expression Analysis
+### 5.2 Pseudobulk & Differential Expression Analysis
 
 ```{r}
 # PATIENT-LEVEL PSEUDOBULK
@@ -2417,7 +2417,7 @@ for (cluster in all_clusters_sa) {
 }
 ```
 
-### 6.4 Validation of DEg Count and Cluster Size
+### 5.4 Validation of DEg Count and Cluster Size
 
 ```{r}
 # DEG COUNT vs CLUSTER SIZE DIAGNOSTIC
@@ -2608,7 +2608,7 @@ for (file in deg_files_sa) {
 }
 ```
 
-### 6.5. GSEA
+### 5.5. GSEA
 
 ```{r}
 
@@ -2782,7 +2782,7 @@ print(pathway_recurrence_summary)
 
 ```
 
-## Step 7: Genome-Scale Metabolic Model Input Preparation
+## Step 6: Genome-Scale Metabolic Model Input Preparation
 
 Prepare the GEM input grouped by SA status
 
